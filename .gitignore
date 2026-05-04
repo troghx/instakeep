@@ -1,0 +1,17 @@
+node_modules/
+logs/
+.playwright-mcp/
+
+.env
+.env.*
+*.local
+
+*.zip
+tmp-*/
+tmp-*.zip
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+*_snapshot.md

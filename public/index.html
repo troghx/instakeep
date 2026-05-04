@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Media Local Gallery</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23010103'/%3E%3Cpath d='M3 8h10M8 3v10' stroke='%2339e49d' stroke-width='2'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-labelledby="app-title">
+        <div class="title-row">
+          <div>
+            <p class="eyebrow">Local only</p>
+            <h1 id="app-title">Media Local Gallery</h1>
+          </div>
+          <div class="status-pill" id="privacy-status">Solo localhost</div>
+        </div>
+
+        <div class="step-block">
+          <label for="post-url">Link de red social o archivo directo</label>
+          <div class="inline-control">
+            <input
+              id="post-url"
+              type="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://www.instagram.com/p/... / x.com/... / tiktok.com/... / imagen.mp4"
+            />
+            <button id="build-query" type="button">Analizar link</button>
+          </div>
+        </div>
+
+        <div class="query-box" id="query-box" hidden>
+          <div class="query-row">
+            <label for="query-url">Instagram: consulta opcional con tu sesion activa</label>
+            <button id="copy-query" type="button">Copiar</button>
+          </div>
+          <input id="query-url" readonly />
+          <a id="open-query" target="_blank" rel="noreferrer">Abrir consulta</a>
+          <details>
+            <summary>Fallback</summary>
+            <input id="legacy-url" readonly />
+          </details>
+        </div>
+
+        <div class="step-block">
+          <label for="source-input">HTML, JSON o URLs capturadas</label>
+          <textarea
+            id="source-input"
+            rows="10"
+            spellcheck="false"
+            placeholder="Pega aqui HTML/JSON/source de una publicacion que ya puedas ver, o usa la extension local..."
+          ></textarea>
+        </div>
+
+        <div class="action-row">
+          <button id="parse-source" type="button">Mostrar galeria</button>
+          <button id="load-capture" type="button" class="secondary">Usar captura local</button>
+          <button id="upgrade-quality" type="button" class="secondary" disabled>Mejorar calidad</button>
+          <button id="download-large" type="button" class="secondary" disabled>Descargar &gt;500 ZIP</button>
+          <button id="download-report" type="button" class="secondary" disabled>Reporte TXT</button>
+          <button id="copy-all" type="button" class="secondary" disabled>Copiar URLs</button>
+          <button id="clear-all" type="button" class="secondary">Limpiar</button>
+        </div>
+
+        <p class="message" id="message" role="status"></p>
+      </section>
+
+      <section class="results" aria-labelledby="results-title">
+        <div class="results-header">
+          <div>
+            <p class="eyebrow">Galeria</p>
+            <h2 id="results-title">Media encontrada</h2>
+          </div>
+          <span id="results-count">0 elementos</span>
+        </div>
+        <div class="gallery-grid" id="gallery"></div>
+      </section>
+    </main>
+
+    <template id="media-card-template">
+      <article class="media-card">
+        <div class="preview"></div>
+        <div class="media-meta">
+          <div>
+            <strong class="media-title"></strong>
+            <span class="media-details"></span>
+          </div>
+          <div class="media-actions">
+            <a class="download-link">Descargar</a>
+            <button class="copy-link" type="button">Copiar URL</button>
+            <a class="open-link" target="_blank" rel="noreferrer">Abrir</a>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

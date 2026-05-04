@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Media Local Gallery Companion",
+  "version": "0.1.0",
+  "description": "Captures the current tab HTML/JSON/resource URLs and sends them to the local Media Local Gallery app.",
+  "permissions": ["activeTab", "scripting", "tabs"],
+  "host_permissions": ["http://127.0.0.1:5177/*"],
+  "action": {
+    "default_title": "Capture current tab",
+    "default_popup": "popup.html"
+  }
+}

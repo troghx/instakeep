@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Media Capture</title>
+    <style>
+      body {
+        width: 280px;
+        margin: 0;
+        padding: 14px;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #17211c;
+        background: #f6f7f4;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 16px;
+        line-height: 1.2;
+      }
+
+      button,
+      a {
+        width: 100%;
+        display: block;
+        border: 1px solid #186b52;
+        border-radius: 8px;
+        background: #186b52;
+        color: white;
+        padding: 10px 12px;
+        text-align: center;
+        text-decoration: none;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button + button {
+        margin-top: 8px;
+      }
+
+      a {
+        box-sizing: border-box;
+        margin-top: 8px;
+        background: transparent;
+        color: #186b52;
+      }
+
+      p {
+        min-height: 36px;
+        margin: 10px 0 0;
+        color: #68756e;
+        font-size: 13px;
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Media Local Gallery</h1>
+    <button id="capture" type="button">Capturar visible</button>
+    <button id="deep-capture" type="button">Captura profunda con scroll</button>
+    <a href="http://127.0.0.1:5177" target="_blank" rel="noreferrer">Abrir app local</a>
+    <p id="status">Captura solo cuando pulsas el boton.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>
