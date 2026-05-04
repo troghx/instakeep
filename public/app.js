@@ -41,6 +41,10 @@ const elements = {
   gallery: document.querySelector("#gallery"),
   resultsCount: document.querySelector("#results-count"),
   template: document.querySelector("#media-card-template"),
+  viewer: document.querySelector("#media-viewer"),
+  viewerStage: document.querySelector("#viewer-stage"),
+  viewerCaption: document.querySelector("#viewer-caption"),
+  viewerClose: document.querySelector("#viewer-close"),
 };
 
 let currentItems = [];
@@ -83,6 +87,22 @@ function normalizeUrl(value) {
     return new URL(raw).toString();
   } catch {
     return "";
+  }
+}
+
+function canonicalMediaUrl(value) {
+  const normalized = normalizeUrl(value);
+  if (!normalized) return "";
+
+  try {
+    const url = new URL(normalized);
+    if (url.searchParams.has("bytestart") || url.searchParams.has("byteend")) {
+      url.searchParams.delete("bytestart");
+      url.searchParams.delete("byteend");
+    }
+    return url.toString();
+  } catch {
+    return normalized;
   }
 }
 
@@ -569,7 +589,7 @@ function extractUrlCandidates(value) {
   const urls = new Set();
   const urlPattern = /https?:\/\/[^\s"'<>\\)]+/g;
   for (const match of normalized.matchAll(urlPattern)) {
-    const url = normalizeUrl(match[0]);
+    const url = canonicalMediaUrl(match[0]);
     if (isLikelyMediaUrl(url)) urls.add(url);
   }
   return [...urls].map((url) => ({
@@ -608,7 +628,7 @@ function isLikelyMediaUrl(value) {
 function dedupeItems(items) {
   const seen = new Set();
   return items.filter((item) => {
-    const key = item.url.split("&bytestart=")[0];
+    const key = canonicalMediaUrl(item.url) || item.url;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -620,7 +640,7 @@ function dedupeItemsWithReport(items, rows) {
   const result = [];
 
   items.forEach((item, index) => {
-    const key = item.url.split("&bytestart=")[0];
+    const key = canonicalMediaUrl(item.url) || item.url;
     if (seen.has(key)) {
       rows.push(reportRowForItem(item, "filtrada", "duplicada", index));
       return;
@@ -683,6 +703,10 @@ function smallKnownReason(item) {
   return parts.length > 0 ? `dimension <=540 (${parts.join(", ")})` : "";
 }
 
+function isPreviewProbeFailure(result) {
+  return ["hls-skip", "image-load-error", "timeout", "video-metadata-error"].includes(result?.error || "");
+}
+
 function filterItemsWithReport(items, rows) {
   const hasFullOnlyFansMedia = items.some((item) => isOnlyFansFullMediaUrl(item.url));
   const accepted = [];
@@ -711,7 +735,7 @@ function sortMediaItems(items) {
 }
 
 function mediaItemFromUrl(url, source, extra = {}) {
-  const upgraded = normalizeUrl(url);
+  const upgraded = canonicalMediaUrl(url);
   if (!upgraded || !isLikelyMediaUrl(upgraded)) return null;
   const dimensions = dimensionsFromUrl(upgraded);
   return {
@@ -1200,6 +1224,15 @@ async function auditGalleryDimensions(items, label = "galeria") {
       return updated;
     }
 
+    if (isPreviewProbeFailure(result)) {
+      filtered += 1;
+      updateReportRow(item, {
+        status: "filtrada",
+        reason: `preview no disponible (${result.error || label})`,
+      });
+      return null;
+    }
+
     updateReportRow(item, {
       status: "aceptada",
       reason: `audit sin dimension (${result.error || label})`,
@@ -1209,6 +1242,7 @@ async function auditGalleryDimensions(items, label = "galeria") {
 
   const kept = [];
   audited.forEach((item, index) => {
+    if (!item) return;
     const reason = smallKnownReason(item);
     if (reason) {
       filtered += 1;
@@ -1283,6 +1317,44 @@ async function downloadStaticItems(items) {
   );
 }
 
+function viewerCaptionFor(item, index) {
+  return [
+    `${item.type === "video" ? "Video" : "Imagen"} ${index + 1}`,
+    item.width && item.height ? `${item.width} x ${item.height}` : "",
+    item.platform,
+    item.source,
+  ]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function openMediaViewer(item, index) {
+  elements.viewerStage.textContent = "";
+  const media = item.type === "video" ? document.createElement("video") : document.createElement("img");
+
+  media.src = item.url;
+  if (item.type === "video") {
+    media.poster = item.previewUrl && item.previewUrl !== item.url ? item.previewUrl : "";
+    media.controls = true;
+    media.autoplay = true;
+    media.playsInline = true;
+  } else {
+    media.alt = item.caption || viewerCaptionFor(item, index);
+  }
+
+  elements.viewerStage.append(media);
+  elements.viewerCaption.textContent = viewerCaptionFor(item, index);
+  elements.viewer.hidden = false;
+  document.body.classList.add("viewer-open");
+}
+
+function closeMediaViewer() {
+  elements.viewer.hidden = true;
+  elements.viewerStage.textContent = "";
+  elements.viewerCaption.textContent = "";
+  document.body.classList.remove("viewer-open");
+}
+
 function renderItemsFromDirectLink(inputUrl) {
   const item = mediaItemFromUrl(inputUrl, "direct-link");
   if (!item) return false;
@@ -1312,6 +1384,8 @@ function renderGallery(items) {
     const open = node.querySelector(".open-link");
     const filename = filenameFor(item, index);
 
+    preview.classList.add("m-clickable");
+
     if (item.type === "video") {
       const video = document.createElement("video");
       video.src = item.url;
@@ -1319,8 +1393,9 @@ function renderGallery(items) {
       video.controls = true;
       video.preload = "metadata";
       video.addEventListener("error", () => {
-        preview.replaceChildren(Object.assign(document.createElement("span"), { textContent: "Preview no disponible" }));
+        node.remove();
       });
+      video.addEventListener("dblclick", () => openMediaViewer(item, index));
       preview.append(video);
     } else {
       const img = document.createElement("img");
@@ -1328,8 +1403,9 @@ function renderGallery(items) {
       img.alt = item.caption || `Media ${index + 1}`;
       img.loading = "lazy";
       img.addEventListener("error", () => {
-        preview.replaceChildren(Object.assign(document.createElement("span"), { textContent: "Preview no disponible" }));
+        node.remove();
       });
+      img.addEventListener("click", () => openMediaViewer(item, index));
       preview.append(img);
     }
 
@@ -1352,6 +1428,11 @@ function renderGallery(items) {
       download.download = filename;
     }
     open.href = item.url;
+    open.textContent = "Ver";
+    open.addEventListener("click", (event) => {
+      event.preventDefault();
+      openMediaViewer(item, index);
+    });
     copy.addEventListener("click", async () => {
       await navigator.clipboard.writeText(item.url);
       setMessage(`URL copiada: ${title.textContent}`);
@@ -1604,6 +1685,14 @@ elements.clearAll.addEventListener("click", () => {
   if (!isStaticPagesMode) {
     fetch("/api/capture", { method: "DELETE" }).catch(() => {});
   }
+});
+
+elements.viewerClose.addEventListener("click", closeMediaViewer);
+elements.viewer.addEventListener("click", (event) => {
+  if (event.target === elements.viewer) closeMediaViewer();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.viewer.hidden) closeMediaViewer();
 });
 
 if (isStaticPagesMode) {
