@@ -4,9 +4,14 @@ Webapp local para extraer una galeria de imagenes/videos desde HTML, JSON, sourc
 
 ## Demo en GitHub Pages
 
-GitHub Pages despliega solo `public/` como demo estatica. Sirve para revisar la interfaz, pegar HTML/URLs y abrir archivos directos, pero no ejecuta el backend Node.
+GitHub Pages despliega solo `public/` como app estatica. Desde Pages puede:
 
-Para usar captura local, proxy de descarga, mejora de calidad y ZIP masivo, corre la app en tu equipo con `npm start`.
+1. Pegar HTML/JSON/source o URLs directas.
+2. Auditar dimensiones reales cargando imagenes/videos en el navegador.
+3. Probar variantes de mayor calidad que el navegador pueda cargar.
+4. Descargar archivos directos si el CDN permite CORS; si no, abre el enlace directo en una pestana nueva.
+
+Para usar captura local, proxy de descarga y ZIP masivo fiable, corre la app en tu equipo con `npm start`. GitHub Pages no puede leer cookies de otras paginas ni actuar como proxy.
 
 ## Uso
 

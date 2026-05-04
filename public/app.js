@@ -56,7 +56,7 @@ function setMessage(text, isError = false) {
 function needsLocalServer(action) {
   if (!isStaticPagesMode) return false;
   setMessage(
-    `${action} necesita el servidor local con npm start. En GitHub Pages solo esta disponible la demo estatica.`,
+    `${action} necesita el servidor local con npm start. GitHub Pages no puede leer capturas locales ni cookies de otras paginas.`,
     true,
   );
   return true;
@@ -973,16 +973,41 @@ function largeDownloadItems(items) {
 
 function qualityScore(result) {
   const bytes = Number(result.probe.contentLength || 0);
-  return bytes * 100 + Number(result.candidate.priority || 0) - result.index;
+  const pixels = Number(result.probe.width || 0) * Number(result.probe.height || 0);
+  return bytes * 100 + pixels + Number(result.candidate.priority || 0) - result.index;
 }
 
 async function probeQualityCandidate(candidate) {
   if (isStaticPagesMode) {
+    const item = mediaItemFromUrl(candidate.url, candidate.reason) || {
+      url: candidate.url,
+      previewUrl: candidate.url,
+      type: inferMediaType(candidate.url),
+      width: 0,
+      height: 0,
+      platform: platformFromUrl(candidate.url),
+      source: candidate.reason,
+    };
+    const probe = await probeRealDimensions(item);
+    if (!probe.ok || (item.type === "image" && (!probe.width || !probe.height))) {
+      return {
+        ok: false,
+        candidate,
+        status: 0,
+        error: probe.error || "media no cargo en navegador",
+      };
+    }
+
     return {
-      ok: false,
+      ok: true,
       candidate,
-      status: 0,
-      error: "requiere servidor local",
+      probe: {
+        url: candidate.url,
+        width: probe.width || item.width || 0,
+        height: probe.height || item.height || 0,
+        contentLength: 0,
+        contentType: item.type === "video" ? "video/browser" : "image/browser",
+      },
     };
   }
 
@@ -1060,6 +1085,8 @@ async function improveItemQuality(item) {
       url: bestUrl,
       previewUrl: item.type === "image" ? bestUrl : item.previewUrl,
       source: reason,
+      width: best.probe.width || item.width || 0,
+      height: best.probe.height || item.height || 0,
       byteSize: best.probe.contentLength || item.byteSize || 0,
       contentType: best.probe.contentType || item.contentType || "",
     },
@@ -1209,6 +1236,53 @@ function filenameFor(item, index) {
   return `${item.platform || "media"}${shortcode}-${String(index + 1).padStart(2, "0")}.${ext}`;
 }
 
+function clickDownloadLink(href, filename = "", target = "") {
+  const link = document.createElement("a");
+  link.href = href;
+  if (filename) link.download = filename;
+  if (target) {
+    link.target = target;
+    link.rel = "noreferrer";
+  }
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function downloadStaticItem(item, index) {
+  const filename = filenameFor(item, index);
+  try {
+    const response = await fetch(item.url, { mode: "cors", credentials: "omit", cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("blob vacio");
+    const objectUrl = URL.createObjectURL(blob);
+    clickDownloadLink(objectUrl, filename);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    return { ok: true, direct: false };
+  } catch {
+    clickDownloadLink(item.url, filename, "_blank");
+    return { ok: true, direct: true };
+  }
+}
+
+async function downloadStaticItems(items) {
+  let direct = 0;
+  for (let index = 0; index < items.length; index += 1) {
+    setMessage(`Descargando en Pages... ${index + 1}/${items.length}`);
+    const result = await downloadStaticItem(items[index], index);
+    if (result.direct) direct += 1;
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+
+  setMessage(
+    direct > 0
+      ? `Intente descargar ${items.length} elemento(s). ${direct} se abrieron como enlace directo porque el CDN bloqueo CORS.`
+      : `Descargando ${items.length} elemento(s) desde Pages.`,
+    false,
+  );
+}
+
 function renderItemsFromDirectLink(inputUrl) {
   const item = mediaItemFromUrl(inputUrl, "direct-link");
   if (!item) return false;
@@ -1224,8 +1298,8 @@ function renderGallery(items) {
   elements.resultsCount.textContent = `${items.length} ${items.length === 1 ? "elemento" : "elementos"}`;
   elements.copyAll.disabled = items.length === 0;
   elements.loadCapture.disabled = isStaticPagesMode;
-  elements.upgradeQuality.disabled = isStaticPagesMode || items.length === 0;
-  elements.downloadLarge.disabled = isStaticPagesMode || largeDownloadItems(items).length === 0;
+  elements.upgradeQuality.disabled = items.length === 0;
+  elements.downloadLarge.disabled = largeDownloadItems(items).length === 0;
   elements.downloadReport.disabled = items.length === 0 && lastGalleryReport.length === 0;
 
   items.forEach((item, index) => {
@@ -1378,7 +1452,6 @@ elements.loadCapture.addEventListener("click", async () => {
 });
 
 elements.upgradeQuality.addEventListener("click", async () => {
-  if (needsLocalServer("Mejorar calidad")) return;
   if (currentItems.length === 0) return;
 
   const controls = [
@@ -1404,7 +1477,7 @@ elements.upgradeQuality.addEventListener("click", async () => {
       completed += 1;
       if (result.improved) improved += 1;
       if (result.failureSummary && failureSamples.size < 3) failureSamples.add(result.failureSummary);
-      setMessage(`Buscando maxima calidad... ${completed}/${currentItems.length}`);
+      setMessage(`Buscando maxima calidad${isStaticPagesMode ? " en navegador" : ""}... ${completed}/${currentItems.length}`);
       return result.item;
     });
 
@@ -1414,26 +1487,29 @@ elements.upgradeQuality.addEventListener("click", async () => {
     const failureText = [...failureSamples].filter(Boolean).slice(0, 2).join(" / ");
     setMessage(
       improved > 0
-        ? `Mejore ${improved} de ${results.length} elemento(s). Si alguno sigue pequeno, esa pagina solo expuso miniaturas o el CDN rechazo la variante HD.`
-        : `Revise las URLs, pero no encontre variantes de mayor calidad que respondan.${failureText ? ` Motivo visto: ${failureText}.` : ""}`,
+        ? `Mejore ${improved} de ${results.length} elemento(s).${isStaticPagesMode ? " En Pages se valida por carga real en el navegador, sin proxy." : " Si alguno sigue pequeno, esa pagina solo expuso miniaturas o el CDN rechazo la variante HD."}`
+        : `Revise las URLs, pero no encontre variantes de mayor calidad que carguen.${failureText ? ` Motivo visto: ${failureText}.` : ""}`,
       improved === 0,
     );
   } catch (error) {
     setMessage(`No pude mejorar la calidad: ${error.message}`, true);
   } finally {
-    renderGallery(currentItems);
     elements.parseSource.disabled = false;
-    elements.loadCapture.disabled = false;
     elements.clearAll.disabled = false;
+    if (!isStaticPagesMode) elements.loadCapture.disabled = false;
+    renderGallery(currentItems);
   }
 });
 
 elements.downloadLarge.addEventListener("click", async () => {
-  if (needsLocalServer("Descargar ZIP")) return;
-
   const selectedItems = largeDownloadItems(currentItems);
   if (selectedItems.length === 0) {
     setMessage("No hay elementos descargables: imagenes >=500 x 500 o videos, siempre sin dimension 540.", true);
+    return;
+  }
+
+  if (isStaticPagesMode) {
+    await downloadStaticItems(selectedItems);
     return;
   }
 
@@ -1484,8 +1560,8 @@ elements.downloadLarge.addEventListener("click", async () => {
     setMessage(`No pude preparar el ZIP: ${error.message}`, true);
   } finally {
     elements.parseSource.disabled = false;
-    elements.loadCapture.disabled = false;
     elements.clearAll.disabled = false;
+    if (!isStaticPagesMode) elements.loadCapture.disabled = false;
     renderGallery(currentItems);
   }
 });
@@ -1533,8 +1609,7 @@ elements.clearAll.addEventListener("click", () => {
 if (isStaticPagesMode) {
   const privacyStatus = document.querySelector("#privacy-status");
   if (privacyStatus) privacyStatus.textContent = "Demo GitHub Pages";
+  elements.downloadLarge.textContent = "Descargar directas >500";
   elements.loadCapture.disabled = true;
-  elements.upgradeQuality.disabled = true;
-  elements.downloadLarge.disabled = true;
-  setMessage("Demo estatica: para capturas, proxy local, mejora de calidad y ZIP usa npm start en tu equipo.", true);
+  setMessage("Modo Pages: puedes pegar HTML/JSON/URLs, auditar dimensiones, mejorar calidad en navegador y descargar enlaces directos. Captura local y ZIP con proxy requieren npm start.", true);
 }
