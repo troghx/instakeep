@@ -18,46 +18,27 @@
           <div class="status-pill" id="privacy-status">Solo localhost</div>
         </div>
 
-        <div class="step-block">
-          <label for="post-url">Link de red social o archivo directo</label>
-          <div class="inline-control">
-            <input
-              id="post-url"
-              type="url"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="https://www.instagram.com/p/... / x.com/... / tiktok.com/... / imagen.mp4"
-            />
-            <button id="build-query" type="button">Analizar link</button>
+        <div class="capture-card">
+          <div>
+            <p class="eyebrow">Flujo recomendado</p>
+            <strong>Captura la pestaña activa y trae la galería limpia.</strong>
+            <span>Abre la publicación, pulsa la extensión “Capture current tab” y vuelve aquí para cargarla.</span>
           </div>
+          <button id="load-capture" type="button">Usar captura local</button>
         </div>
 
-        <div class="query-box" id="query-box" hidden>
-          <div class="query-row">
-            <label for="query-url">Instagram: consulta opcional con tu sesion activa</label>
-            <button id="copy-query" type="button">Copiar</button>
-          </div>
-          <input id="query-url" readonly />
-          <a id="open-query" target="_blank" rel="noreferrer">Abrir consulta</a>
-          <details>
-            <summary>Fallback</summary>
-            <input id="legacy-url" readonly />
-          </details>
-        </div>
-
-        <div class="step-block">
-          <label for="source-input">HTML, JSON o URLs capturadas</label>
+        <details class="advanced-source">
+          <summary>Avanzado: pegar HTML, JSON o URLs manualmente</summary>
           <textarea
             id="source-input"
-            rows="10"
+            rows="6"
             spellcheck="false"
-            placeholder="Pega aqui HTML/JSON/source de una publicacion que ya puedas ver, o usa la extension local..."
+            placeholder="Pega aqui HTML/JSON/source si necesitas revisar algo sin usar la extension..."
           ></textarea>
-        </div>
+          <button id="parse-source" type="button" class="secondary">Mostrar galeria manual</button>
+        </details>
 
-        <div class="action-row">
-          <button id="parse-source" type="button">Mostrar galeria</button>
-          <button id="load-capture" type="button" class="secondary">Usar captura local</button>
+        <div class="action-row" hidden>
           <button id="upgrade-quality" type="button" class="secondary" disabled>Mejorar calidad</button>
           <button id="download-large" type="button" class="secondary" disabled>Descargar &gt;500 ZIP</button>
           <button id="download-report" type="button" class="secondary" disabled>Reporte TXT</button>
@@ -76,6 +57,41 @@
           </div>
           <span id="results-count">0 elementos</span>
         </div>
+
+        <div class="gallery-toolbar" id="gallery-toolbar" hidden>
+          <div class="filter-panel" aria-label="Filtros rapidos de galeria">
+            <div class="filter-group" role="group" aria-label="Filtrar por tipo">
+              <span>Tipo</span>
+              <button class="filter-chip is-active" type="button" data-filter-group="type" data-filter-value="all">Todo</button>
+              <button class="filter-chip" type="button" data-filter-group="type" data-filter-value="image">Fotos</button>
+              <button class="filter-chip" type="button" data-filter-group="type" data-filter-value="video">Videos</button>
+            </div>
+            <div class="filter-group" role="group" aria-label="Filtrar por orientacion">
+              <span>Formato</span>
+              <button class="filter-chip is-active" type="button" data-filter-group="orientation" data-filter-value="all">Todos</button>
+              <button class="filter-chip" type="button" data-filter-group="orientation" data-filter-value="vertical">Vertical</button>
+              <button class="filter-chip" type="button" data-filter-group="orientation" data-filter-value="horizontal">Horizontal</button>
+              <button class="filter-chip" type="button" data-filter-group="orientation" data-filter-value="square">Cuadro</button>
+            </div>
+            <div class="filter-group" role="group" aria-label="Filtrar por calidad">
+              <span>Calidad</span>
+              <button class="filter-chip is-active" type="button" data-filter-group="quality" data-filter-value="all">Todas</button>
+              <button class="filter-chip" type="button" data-filter-group="quality" data-filter-value="hd">HD</button>
+              <button class="filter-chip" type="button" data-filter-group="quality" data-filter-value="unknown">Sin medir</button>
+            </div>
+          </div>
+          <div class="selection-panel">
+            <span id="selection-summary">Sin seleccion</span>
+            <button id="select-visible" type="button" class="tertiary">Seleccionar visibles</button>
+            <button id="clear-selection" type="button" class="tertiary" disabled>Quitar seleccion</button>
+          </div>
+          <p class="gallery-stats" id="gallery-stats"></p>
+        </div>
+
+        <div class="gallery-empty" id="gallery-empty" hidden>
+          <strong>No hay media con esos filtros</strong>
+          <span>Cambia el tipo, formato o calidad para volver a mostrar resultados.</span>
+        </div>
         <div class="gallery-grid" id="gallery"></div>
       </section>
     </main>
@@ -83,24 +99,25 @@
     <template id="media-card-template">
       <article class="media-card">
         <div class="preview"></div>
-        <div class="media-meta">
-          <div>
-            <strong class="media-title"></strong>
-            <span class="media-details"></span>
-          </div>
-          <div class="media-actions">
-            <a class="download-link">Descargar</a>
-            <button class="copy-link" type="button">Copiar URL</button>
-            <a class="open-link" target="_blank" rel="noreferrer">Abrir</a>
-          </div>
-        </div>
       </article>
     </template>
 
-    <div class="media-viewer" id="media-viewer" hidden>
-      <button class="viewer-close" id="viewer-close" type="button" aria-label="Cerrar visor">Cerrar</button>
+    <div class="media-viewer" id="media-viewer" role="dialog" aria-modal="true" aria-label="Visor de media" tabindex="-1" hidden>
+      <div class="viewer-topbar">
+        <strong class="viewer-caption" id="viewer-caption"></strong>
+        <div class="viewer-controls">
+          <button class="viewer-nav" id="viewer-prev" type="button" aria-label="Ver elemento anterior">‹</button>
+          <button class="viewer-nav" id="viewer-next" type="button" aria-label="Ver elemento siguiente">›</button>
+          <span class="viewer-zoom-value" id="viewer-zoom-value">Ajustado</span>
+          <button class="viewer-zoom" id="viewer-zoom-out" type="button" aria-label="Alejar imagen">-</button>
+          <button class="viewer-zoom-reset" id="viewer-zoom-reset" type="button">Ajustar</button>
+          <button class="viewer-zoom" id="viewer-zoom-in" type="button" aria-label="Acercar imagen">+</button>
+          <a class="viewer-original" id="viewer-original" target="_blank" rel="noreferrer">Abrir</a>
+          <button class="viewer-copy-url" id="viewer-copy-url" type="button">Copiar</button>
+          <button class="viewer-close" id="viewer-close" type="button" aria-label="Cerrar visor">Cerrar</button>
+        </div>
+      </div>
       <div class="viewer-stage" id="viewer-stage"></div>
-      <div class="viewer-caption" id="viewer-caption"></div>
     </div>
 
     <script src="./app.js" type="module"></script>

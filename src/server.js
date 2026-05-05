@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
@@ -10,11 +10,9 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
-const logsDir = path.join(rootDir, "logs");
 const port = Number.parseInt(process.env.PORT || "5177", 10);
 const captureLimitBytes = 260 * 1024 * 1024;
 const zipRequestLimitBytes = 5 * 1024 * 1024;
-const reportRequestLimitBytes = 40 * 1024 * 1024;
 const maxZipItems = 300;
 let latestCapture = null;
 const zipBatches = new Map();
@@ -894,18 +892,6 @@ function normalizeZipItems(payload) {
   return items;
 }
 
-async function persistTextReport(kind, report, dateStamp) {
-  try {
-    await mkdir(logsDir, { recursive: true });
-    await Promise.all([
-      writeFile(path.join(logsDir, `latest-${kind}-report.txt`), report, "utf8"),
-      writeFile(path.join(logsDir, `${kind}-report-${dateStamp}.txt`), report, "utf8"),
-    ]);
-  } catch (error) {
-    console.warn(`Could not write ${kind} report: ${error.message}`);
-  }
-}
-
 async function prepareDownloadZip(req, res) {
   let payload;
   try {
@@ -1050,7 +1036,6 @@ async function streamDownloadZip(res, batch) {
     "",
   ].join("\n");
 
-  await persistTextReport("download", report, dateStamp);
   await zip.addBuffer("download-report.txt", report);
 
   await zip.finish();
@@ -1078,42 +1063,6 @@ async function handleDownloadZip(req, res, requestUrl) {
 
   zipBatches.delete(id);
   await streamDownloadZip(res, batch);
-}
-
-async function handleGalleryReport(req, res) {
-  if (req.method !== "POST") {
-    sendJson(res, 405, { ok: false, error: "Method not allowed" });
-    return;
-  }
-
-  let rawBody;
-  try {
-    rawBody = await readRequestBody(req, reportRequestLimitBytes);
-  } catch (error) {
-    sendJson(res, 400, { ok: false, error: error.message });
-    return;
-  }
-
-  let report = rawBody;
-  try {
-    const payload = JSON.parse(rawBody);
-    if (typeof payload.report === "string") report = payload.report;
-  } catch {
-    // Plain text reports are accepted too.
-  }
-
-  if (!String(report || "").trim()) {
-    sendJson(res, 400, { ok: false, error: "Empty report" });
-    return;
-  }
-
-  const dateStamp = new Date().toISOString().replace(/[:.]/g, "-");
-  await persistTextReport("gallery", String(report), dateStamp);
-  sendJson(res, 200, {
-    ok: true,
-    latest: "logs/latest-gallery-report.txt",
-    archived: `logs/gallery-report-${dateStamp}.txt`,
-  });
 }
 
 async function handleCapture(req, res) {
@@ -1269,11 +1218,6 @@ const server = createServer(async (req, res) => {
 
   if (requestUrl.pathname === "/api/download-zip") {
     await handleDownloadZip(req, res, requestUrl);
-    return;
-  }
-
-  if (requestUrl.pathname === "/api/gallery-report") {
-    await handleGalleryReport(req, res);
     return;
   }
 

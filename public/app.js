@@ -1,4 +1,3 @@
-const POST_QUERY_DOC_ID = "8845758582119845";
 const MEDIA_EXTENSIONS = /\.(avif|gif|jpe?g|m3u8?|m4v|mov|mp4|png|webm|webp)(?:$|[?#])/i;
 const VIDEO_EXTENSIONS = /\.(m3u8?|m4v|mov|mp4|webm)(?:$|[?#])/i;
 const IMAGE_EXTENSIONS = /\.(avif|gif|jpe?g|png|webp)(?:$|[?#])/i;
@@ -22,13 +21,6 @@ const KNOWN_MEDIA_HOSTS = [
 const SIZE_QUERY_PARAMS = ["w", "h", "width", "height", "resize", "crop", "fit", "size"];
 
 const elements = {
-  postUrl: document.querySelector("#post-url"),
-  buildQuery: document.querySelector("#build-query"),
-  queryBox: document.querySelector("#query-box"),
-  queryUrl: document.querySelector("#query-url"),
-  legacyUrl: document.querySelector("#legacy-url"),
-  copyQuery: document.querySelector("#copy-query"),
-  openQuery: document.querySelector("#open-query"),
   sourceInput: document.querySelector("#source-input"),
   parseSource: document.querySelector("#parse-source"),
   loadCapture: document.querySelector("#load-capture"),
@@ -37,18 +29,51 @@ const elements = {
   downloadReport: document.querySelector("#download-report"),
   copyAll: document.querySelector("#copy-all"),
   clearAll: document.querySelector("#clear-all"),
+  actionRow: document.querySelector(".action-row"),
   message: document.querySelector("#message"),
   gallery: document.querySelector("#gallery"),
+  galleryToolbar: document.querySelector("#gallery-toolbar"),
+  galleryStats: document.querySelector("#gallery-stats"),
+  galleryEmpty: document.querySelector("#gallery-empty"),
+  filterChips: document.querySelectorAll(".filter-chip"),
+  selectionSummary: document.querySelector("#selection-summary"),
+  selectVisible: document.querySelector("#select-visible"),
+  clearSelection: document.querySelector("#clear-selection"),
   resultsCount: document.querySelector("#results-count"),
   template: document.querySelector("#media-card-template"),
   viewer: document.querySelector("#media-viewer"),
   viewerStage: document.querySelector("#viewer-stage"),
   viewerCaption: document.querySelector("#viewer-caption"),
   viewerClose: document.querySelector("#viewer-close"),
+  viewerPrev: document.querySelector("#viewer-prev"),
+  viewerNext: document.querySelector("#viewer-next"),
+  viewerZoomValue: document.querySelector("#viewer-zoom-value"),
+  viewerZoomOut: document.querySelector("#viewer-zoom-out"),
+  viewerZoomReset: document.querySelector("#viewer-zoom-reset"),
+  viewerZoomIn: document.querySelector("#viewer-zoom-in"),
+  viewerOriginal: document.querySelector("#viewer-original"),
+  viewerCopyUrl: document.querySelector("#viewer-copy-url"),
 };
 
 let currentItems = [];
 let lastGalleryReport = [];
+let galleryViewItems = [];
+let selectedItemKeys = new Set();
+let galleryRenderRequest = 0;
+const galleryFilters = {
+  type: "all",
+  orientation: "all",
+  quality: "all",
+};
+let viewerState = {
+  item: null,
+  index: -1,
+  media: null,
+  items: [],
+  zoom: 1,
+  fit: true,
+  returnFocus: null,
+};
 const dimensionProbeCache = new Map();
 const isStaticPagesMode = !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
 
@@ -358,36 +383,6 @@ function qualityCandidatesForItem(item) {
   return uniqueQualityCandidates(candidates).slice(0, 14);
 }
 
-function parseInstagramUrl(value) {
-  const trimmed = String(value || "").trim();
-  const match = trimmed.match(
-    /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/i,
-  );
-  return match ? match[1] : "";
-}
-
-function buildQueryUrls(inputUrl) {
-  const shortcode = parseInstagramUrl(inputUrl);
-  if (!shortcode) {
-    throw new Error("Necesito un link de post, reel o tv con shortcode.");
-  }
-
-  const variables = {
-    shortcode,
-    fetch_tagged_user_count: null,
-    hoisted_comment_id: null,
-    hoisted_reply_id: null,
-  };
-
-  const queryUrl = `https://www.instagram.com/graphql/query/?doc_id=${POST_QUERY_DOC_ID}&variables=${encodeURIComponent(
-    JSON.stringify(variables),
-  )}`;
-  const cleanUrl = inputUrl.trim().split("?")[0].replace(/\/?$/, "/");
-  const legacyUrl = `${cleanUrl}?__a=1&__d=dis`;
-
-  return { queryUrl, legacyUrl };
-}
-
 function tryParseJson(value) {
   const attempts = [value, normalizeEscapes(value)];
   for (const candidate of attempts) {
@@ -623,6 +618,161 @@ function isLikelyMediaUrl(value) {
   } catch {
     return false;
   }
+}
+
+function decodeBase64UrlJson(value) {
+  if (!value) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function instagramVideoMetadata(value) {
+  try {
+    const url = new URL(value);
+    return decodeBase64UrlJson(url.searchParams.get("efg"));
+  } catch {
+    return null;
+  }
+}
+
+function isInstagramBackgroundVideoResource(value) {
+  try {
+    const url = new URL(value);
+    const metadata = instagramVideoMetadata(value);
+    const delegatedHost = url.searchParams.get("_nc_ht") || "";
+    const isInstagramCdn =
+      hostMatches(url.hostname, "fbcdn.net") &&
+      (delegatedHost.includes("instagram") || metadata?.client_name === "ig");
+    if (!isInstagramCdn || inferMediaType(value) !== "video") return false;
+
+    return (
+      url.hostname.startsWith("video.") &&
+      (metadata?.video_id === null || /(?:xpvds|dash)/i.test(String(metadata?.vencode_tag || "")))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function addCanonicalMediaUrl(target, value) {
+  const url = canonicalMediaUrl(value);
+  if (url && isLikelyMediaUrl(url)) target.add(url);
+}
+
+function collectCaptureUrlContext(jsonRoots) {
+  const context = {
+    resources: new Set(),
+    elements: new Set(),
+    visible: new Set(),
+    hiddenMedia: new Set(),
+    hasCapture: false,
+  };
+  const seenObjects = new WeakSet();
+
+  function isVisibleCapturedMedia(value) {
+    const clientWidth = Number(value?.clientWidth || 0);
+    const clientHeight = Number(value?.clientHeight || 0);
+    const width = Number(value?.width || 0);
+    const height = Number(value?.height || 0);
+    return (
+      (clientWidth >= 64 && clientHeight >= 64) ||
+      (clientWidth === 0 && clientHeight === 0 && value?.tag === "img" && width >= 300 && height >= 300)
+    );
+  }
+
+  function addArrayUrls(target, values) {
+    if (!Array.isArray(values)) return;
+    values.forEach((value) => {
+      if (typeof value === "string") {
+        addCanonicalMediaUrl(target, value);
+        return;
+      }
+
+      if (value && typeof value === "object") {
+        [
+          value.url,
+          value.currentSrc,
+          value.src,
+          value.poster,
+          value.href,
+          value.content,
+        ].forEach((candidate) => addCanonicalMediaUrl(target, candidate));
+      }
+    });
+  }
+
+  function walk(node) {
+    if (!node || typeof node !== "object" || seenObjects.has(node)) return;
+    seenObjects.add(node);
+
+    if (Array.isArray(node.resources)) {
+      context.hasCapture = true;
+      addArrayUrls(context.resources, node.resources);
+    }
+
+    if (Array.isArray(node.elements)) {
+      context.hasCapture = true;
+      addArrayUrls(context.elements, node.elements);
+    }
+
+    if (Array.isArray(node.mediaElements)) {
+      context.hasCapture = true;
+      node.mediaElements.forEach((value) => {
+        const target = isVisibleCapturedMedia(value) ? context.visible : context.hiddenMedia;
+        addArrayUrls(target, [value]);
+      });
+    }
+
+    Object.values(node).forEach((value) => {
+      if (value && typeof value === "object") walk(value);
+    });
+  }
+
+  jsonRoots.forEach(walk);
+  context.resourceOnly = new Set(
+    [...context.resources].filter((url) => !context.elements.has(url) && !context.visible.has(url)),
+  );
+  return context;
+}
+
+function filterCaptureResourceNoise(items, rows, captureContext) {
+  if (!captureContext.hasCapture || (captureContext.resourceOnly.size === 0 && captureContext.hiddenMedia.size === 0)) {
+    return items;
+  }
+
+  return items.filter((item, index) => {
+    const key = canonicalMediaUrl(item.url) || item.url;
+    const resourceOnly = captureContext.resourceOnly.has(key);
+    const hiddenCaptureMedia = captureContext.hiddenMedia.has(key) && !captureContext.visible.has(key);
+    const visiblyRendered = captureContext.visible.has(key);
+    const domMention = captureContext.elements.has(key);
+    const sourceAllowsFiltering =
+      item.source === "regex" ||
+      item.source === "resource" ||
+      (item.source === "capture-element" && hiddenCaptureMedia);
+    const shouldFilter =
+      ((resourceOnly && !domMention && !visiblyRendered) || (hiddenCaptureMedia && !visiblyRendered)) &&
+      sourceAllowsFiltering &&
+      item.type === "video" &&
+      isInstagramBackgroundVideoResource(item.url);
+
+    if (!shouldFilter) return true;
+
+    rows.push(
+      reportRowForItem(
+        item,
+        "filtrada",
+        "video fbcdn de performance sin elemento visible",
+        rows.length || index,
+      ),
+    );
+    return false;
+  });
 }
 
 function dedupeItems(items) {
@@ -865,13 +1015,15 @@ function collectCapturedMediaElements(root) {
 
 function parseMediaDetailed(raw) {
   const jsonRoots = extractJsonFromHtml(raw);
+  const captureContext = collectCaptureUrlContext(jsonRoots);
   const captureItems = jsonRoots.flatMap(collectCapturedMediaElements);
   const structured = jsonRoots.flatMap(collectStructuredMedia);
   const domItems = extractDomMedia(raw);
   const regexItems = extractUrlCandidates(raw);
   const reportRows = [];
   const deduped = dedupeItemsWithReport([...captureItems, ...structured, ...domItems, ...regexItems], reportRows);
-  const filtered = filterItemsWithReport(deduped, reportRows);
+  const withoutResourceNoise = filterCaptureResourceNoise(deduped, reportRows, captureContext);
+  const filtered = filterItemsWithReport(withoutResourceNoise, reportRows);
   const items = sortMediaItems(filtered);
   lastGalleryReport = reportRows;
   return { items, reportRows };
@@ -954,20 +1106,6 @@ function downloadTextFile(filename, text) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-async function saveGalleryReport(reportText = buildGalleryReportText()) {
-  if (isStaticPagesMode) return false;
-  try {
-    const response = await fetch("/api/gallery-report", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ report: reportText }),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
 }
 
 function hasBlocked540Dimension(item) {
@@ -1264,8 +1402,25 @@ async function auditGalleryDimensions(items, label = "galeria") {
   };
 }
 
+function extensionForItem(item) {
+  const fallback = item.type === "video" ? "mp4" : "jpg";
+  const allowed = item.type === "video"
+    ? new Set(["m3u", "m3u8", "m4v", "mov", "mp4", "webm"])
+    : new Set(["avif", "gif", "jpg", "jpeg", "png", "webp"]);
+
+  try {
+    const match = new URL(item.url).pathname.match(/\.([a-z0-9]+)$/i);
+    const ext = match?.[1]?.toLowerCase();
+    if (ext && allowed.has(ext)) return ext === "jpeg" ? "jpg" : ext;
+  } catch {
+    // Keep fallback for malformed or extensionless media URLs.
+  }
+
+  return fallback;
+}
+
 function filenameFor(item, index) {
-  const ext = item.type === "video" ? "mp4" : "jpg";
+  const ext = extensionForItem(item);
   const shortcode = item.shortcode ? `-${item.shortcode}` : "";
   return `${item.platform || "media"}${shortcode}-${String(index + 1).padStart(2, "0")}.${ext}`;
 }
@@ -1317,19 +1472,116 @@ async function downloadStaticItems(items) {
   );
 }
 
-function viewerCaptionFor(item, index) {
-  return [
-    `${item.type === "video" ? "Video" : "Imagen"} ${index + 1}`,
-    item.width && item.height ? `${item.width} x ${item.height}` : "",
-    item.platform,
-    item.source,
-  ]
-    .filter(Boolean)
-    .join(" / ");
+function viewerCaptionFor(item, index, totalItems = currentItems.length || index + 1) {
+  const total = totalItems || index + 1;
+  return `${item.type === "video" ? "Video" : "Imagen"} ${index + 1}/${total}`;
 }
 
-function openMediaViewer(item, index) {
+function clampZoom(value) {
+  return Math.min(4, Math.max(0.25, Number(value) || 1));
+}
+
+function viewerNaturalSize() {
+  const media = viewerState.media;
+  const item = viewerState.item || {};
+  return {
+    width: Number(media?.naturalWidth || item.width || 1200),
+    height: Number(media?.naturalHeight || item.height || 1200),
+  };
+}
+
+function updateViewerControls() {
+  const isOpen = !elements.viewer.hidden;
+  const isImage = viewerState.item?.type !== "video";
+  const items = viewerState.items.length > 0 ? viewerState.items : currentItems;
+  const hasMany = items.length > 1;
+
+  elements.viewerPrev.disabled = !isOpen || !hasMany || viewerState.index <= 0;
+  elements.viewerNext.disabled = !isOpen || !hasMany || viewerState.index >= items.length - 1;
+  elements.viewerZoomOut.disabled = !isOpen || !isImage || viewerState.fit;
+  elements.viewerZoomReset.disabled = !isOpen || !isImage || viewerState.fit;
+  elements.viewerZoomIn.disabled = !isOpen || !isImage;
+  elements.viewerZoomValue.textContent = isImage
+    ? viewerState.fit
+      ? "Ajustado"
+      : `${Math.round(viewerState.zoom * 100)}%`
+    : "Video";
+  elements.viewerOriginal.href = viewerState.item?.url || "#";
+}
+
+function fitViewerMedia() {
+  if (!viewerState.media || viewerState.item?.type === "video") return;
+
+  viewerState.fit = true;
+  viewerState.zoom = 1;
+  elements.viewerStage.classList.remove("is-zoomed");
+  viewerState.media.style.removeProperty("width");
+  viewerState.media.style.removeProperty("height");
+  viewerState.media.style.removeProperty("max-width");
+  viewerState.media.style.removeProperty("max-height");
+  requestAnimationFrame(() => {
+    elements.viewerStage.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  });
+  updateViewerControls();
+}
+
+function setViewerZoom(nextZoom) {
+  if (!viewerState.media || viewerState.item?.type === "video") return;
+
+  const stage = elements.viewerStage;
+  const media = viewerState.media;
+  const previousWidth = Math.max(media.offsetWidth, 1);
+  const previousHeight = Math.max(media.offsetHeight, 1);
+  const ratioX = viewerState.fit ? 0.5 : (stage.scrollLeft + stage.clientWidth / 2) / previousWidth;
+  const ratioY = viewerState.fit ? 0.5 : (stage.scrollTop + stage.clientHeight / 2) / previousHeight;
+  const size = viewerNaturalSize();
+
+  viewerState.fit = false;
+  viewerState.zoom = clampZoom(nextZoom);
+  elements.viewerStage.classList.add("is-zoomed");
+  media.style.maxWidth = "none";
+  media.style.maxHeight = "none";
+  media.style.width = `${Math.round(size.width * viewerState.zoom)}px`;
+  media.style.height = "auto";
+
+  requestAnimationFrame(() => {
+    stage.scrollTo({
+      left: Math.max(0, media.offsetWidth * ratioX - stage.clientWidth / 2),
+      top: Math.max(0, media.offsetHeight * ratioY - stage.clientHeight / 2),
+      behavior: "smooth",
+    });
+  });
+  updateViewerControls();
+}
+
+function zoomViewerBy(multiplier) {
+  if (!viewerState.media || viewerState.item?.type === "video") return;
+
+  if (viewerState.fit) {
+    setViewerZoom(multiplier > 1 ? 1 : 0.75);
+    return;
+  }
+
+  const nextZoom = viewerState.zoom * multiplier;
+  if (nextZoom <= 0.35) {
+    fitViewerMedia();
+    return;
+  }
+  setViewerZoom(nextZoom);
+}
+
+function goToViewerItem(offset) {
+  const items = viewerState.items.length > 0 ? viewerState.items : currentItems;
+  if (elements.viewer.hidden || items.length === 0) return;
+  const nextIndex = viewerState.index + offset;
+  if (nextIndex < 0 || nextIndex >= items.length) return;
+  openMediaViewer(items[nextIndex], nextIndex, items);
+}
+
+function openMediaViewer(item, index, items = currentItems) {
+  const returnFocus = elements.viewer.hidden ? document.activeElement : viewerState.returnFocus;
   elements.viewerStage.textContent = "";
+  elements.viewerStage.classList.remove("is-zoomed");
   const media = item.type === "video" ? document.createElement("video") : document.createElement("img");
 
   media.src = item.url;
@@ -1340,136 +1592,498 @@ function openMediaViewer(item, index) {
     media.playsInline = true;
   } else {
     media.alt = item.caption || viewerCaptionFor(item, index);
+    media.decoding = "async";
+    media.addEventListener("load", fitViewerMedia, { once: true });
+    media.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      if (viewerState.fit) {
+        setViewerZoom(1);
+      } else {
+        fitViewerMedia();
+      }
+    });
   }
 
+  media.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  viewerState = {
+    item,
+    index,
+    media,
+    items,
+    zoom: 1,
+    fit: true,
+    returnFocus,
+  };
   elements.viewerStage.append(media);
-  elements.viewerCaption.textContent = viewerCaptionFor(item, index);
+  elements.viewerCaption.textContent = viewerCaptionFor(item, index, items.length);
   elements.viewer.hidden = false;
+  elements.viewer.setAttribute("aria-hidden", "false");
   document.body.classList.add("viewer-open");
+  fitViewerMedia();
+  updateViewerControls();
+  elements.viewer.focus({ preventScroll: true });
 }
 
 function closeMediaViewer() {
+  const returnFocus = viewerState.returnFocus;
   elements.viewer.hidden = true;
+  elements.viewer.setAttribute("aria-hidden", "true");
   elements.viewerStage.textContent = "";
+  elements.viewerStage.classList.remove("is-zoomed");
   elements.viewerCaption.textContent = "";
   document.body.classList.remove("viewer-open");
+  viewerState = {
+    item: null,
+    index: -1,
+    media: null,
+    items: [],
+    zoom: 1,
+    fit: true,
+    returnFocus: null,
+  };
+  updateViewerControls();
+  if (returnFocus?.focus) {
+    returnFocus.focus({ preventScroll: true });
+  }
 }
 
-function renderItemsFromDirectLink(inputUrl) {
-  const item = mediaItemFromUrl(inputUrl, "direct-link");
-  if (!item) return false;
-  currentItems = [item];
-  renderGallery(currentItems);
-  elements.queryBox.hidden = true;
-  setMessage("El link ya parece un archivo de imagen/video directo. Lo deje listo para descargar.");
-  return true;
-}
-
-function renderGallery(items) {
-  elements.gallery.textContent = "";
-  elements.resultsCount.textContent = `${items.length} ${items.length === 1 ? "elemento" : "elementos"}`;
-  elements.copyAll.disabled = items.length === 0;
-  elements.loadCapture.disabled = isStaticPagesMode;
-  elements.upgradeQuality.disabled = items.length === 0;
-  elements.downloadLarge.disabled = largeDownloadItems(items).length === 0;
-  elements.downloadReport.disabled = items.length === 0 && lastGalleryReport.length === 0;
-
-  items.forEach((item, index) => {
-    const node = elements.template.content.firstElementChild.cloneNode(true);
-    const preview = node.querySelector(".preview");
-    const title = node.querySelector(".media-title");
-    const details = node.querySelector(".media-details");
-    const download = node.querySelector(".download-link");
-    const copy = node.querySelector(".copy-link");
-    const open = node.querySelector(".open-link");
-    const filename = filenameFor(item, index);
-
-    preview.classList.add("m-clickable");
-
-    if (item.type === "video") {
-      const video = document.createElement("video");
-      video.src = item.url;
-      video.poster = item.previewUrl && item.previewUrl !== item.url ? item.previewUrl : "";
-      video.controls = true;
-      video.preload = "metadata";
-      video.addEventListener("error", () => {
-        node.remove();
-      });
-      video.addEventListener("dblclick", () => openMediaViewer(item, index));
-      preview.append(video);
-    } else {
-      const img = document.createElement("img");
-      img.src = item.previewUrl || item.url;
-      img.alt = item.caption || `Media ${index + 1}`;
-      img.loading = "lazy";
-      img.addEventListener("error", () => {
-        node.remove();
-      });
-      img.addEventListener("click", () => openMediaViewer(item, index));
-      preview.append(img);
-    }
-
-    title.textContent = `${item.type === "video" ? "Video" : "Imagen"} ${index + 1}`;
-    details.textContent = [
-      item.width && item.height ? `${item.width} x ${item.height}` : "",
-      formatBytes(item.byteSize),
-      item.platform,
-      item.source,
-    ]
-      .filter(Boolean)
-      .join(" / ");
-    if (isStaticPagesMode) {
-      download.href = item.url;
-      download.removeAttribute("download");
-      download.target = "_blank";
-      download.rel = "noreferrer";
-    } else {
-      download.href = `/api/download?url=${encodeURIComponent(item.url)}&filename=${encodeURIComponent(filename)}`;
-      download.download = filename;
-    }
-    open.href = item.url;
-    open.textContent = "Ver";
-    open.addEventListener("click", (event) => {
-      event.preventDefault();
-      openMediaViewer(item, index);
-    });
-    copy.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(item.url);
-      setMessage(`URL copiada: ${title.textContent}`);
-    });
-
-    node.title = item.caption || "";
-    elements.gallery.append(node);
-  });
-}
-
-elements.buildQuery.addEventListener("click", () => {
-  const value = elements.postUrl.value.trim();
-  if (!value) {
-    setMessage("Pega un link o captura una pagina con la extension local.", true);
+function trapViewerFocus(event) {
+  const focusable = [...elements.viewer.querySelectorAll("button:not(:disabled), a[href]:not([aria-disabled='true'])")].filter(
+    (node) => node.offsetParent !== null,
+  );
+  if (focusable.length === 0) {
+    event.preventDefault();
+    elements.viewer.focus({ preventScroll: true });
     return;
   }
 
-  if (renderItemsFromDirectLink(value)) return;
-
-  try {
-    const { queryUrl, legacyUrl } = buildQueryUrls(value);
-    elements.queryUrl.value = queryUrl;
-    elements.legacyUrl.value = legacyUrl;
-    elements.openQuery.href = queryUrl;
-    elements.queryBox.hidden = false;
-    setMessage("Para Instagram puedes usar esta consulta; para otras redes abre el post y usa la captura local.");
-  } catch (error) {
-    elements.queryBox.hidden = true;
-    setMessage("Para esa red social abre el post en tu navegador y usa el companion: Capturar pestana actual.");
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
+}
+
+function configureDownloadLink(download, item, filename) {
+  download.textContent = "Descargar";
+  download.setAttribute("aria-label", `Descargar ${item.type === "video" ? "video" : "imagen"}`);
+
+  if (isStaticPagesMode) {
+    download.href = item.url;
+    download.removeAttribute("download");
+    download.target = "_blank";
+    download.rel = "noreferrer";
+  } else {
+    download.href = `/api/download?url=${encodeURIComponent(item.url)}&filename=${encodeURIComponent(filename)}`;
+    download.download = filename;
+    download.removeAttribute("target");
+    download.removeAttribute("rel");
+  }
+
+  download.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+}
+
+function itemKey(item) {
+  return canonicalMediaUrl(item?.url || "") || item?.url || "";
+}
+
+function filteredReportCount(pattern) {
+  return lastGalleryReport.filter((row) => row.status === "filtrada" && pattern.test(row.reason || "")).length;
+}
+
+function isHighResolutionItem(item) {
+  const { width, height } = itemDimensions(item);
+  return width >= 1000 || height >= 1000 || Number(item.byteSize || 0) >= 1_000_000;
+}
+
+function itemOrientation(item) {
+  const { width, height } = itemDimensions(item);
+  if (!width || !height) return "unknown";
+  const ratio = width / height;
+  if (ratio > 1.08) return "horizontal";
+  if (ratio < 0.92) return "vertical";
+  return "square";
+}
+
+function itemStatusLabel(item) {
+  if (item.loadError) return "Fallo carga";
+  const { width, height } = itemDimensions(item);
+  const parts = [];
+  parts.push(item.type === "video" ? "Video" : "Foto");
+  if (isHighResolutionItem(item)) parts.push("HD");
+  if (item.source && /\+(?!audit\b)|atajo|cdn:|pinterest:|x:|linkedin:|tumblr:/i.test(item.source)) {
+    parts.push("Mejorada");
+  }
+  if (width && height) parts.push(`${width}x${height}`);
+  if (!width && !height) parts.push("Sin medir");
+  return parts.join(" · ");
+}
+
+function matchesGalleryFilters(item) {
+  if (galleryFilters.type !== "all" && item.type !== galleryFilters.type) return false;
+
+  const orientation = itemOrientation(item);
+  if (galleryFilters.orientation !== "all" && orientation !== galleryFilters.orientation) return false;
+
+  if (galleryFilters.quality === "hd" && !isHighResolutionItem(item)) return false;
+  if (galleryFilters.quality === "unknown") {
+    const { width, height } = itemDimensions(item);
+    if (width || height) return false;
+  }
+
+  return true;
+}
+
+function filteredGalleryItems() {
+  return currentItems.filter(matchesGalleryFilters);
+}
+
+function selectedItems() {
+  return currentItems.filter((item) => selectedItemKeys.has(itemKey(item)));
+}
+
+function visibleSelectedItems() {
+  return galleryViewItems.filter((item) => selectedItemKeys.has(itemKey(item)));
+}
+
+function zipSourceItems() {
+  const picked = selectedItems();
+  return picked.length > 0 ? picked : galleryViewItems;
+}
+
+function zipCandidateItems() {
+  return largeDownloadItems(zipSourceItems());
+}
+
+function syncSelectedItems() {
+  const valid = new Set(currentItems.map(itemKey));
+  selectedItemKeys = new Set([...selectedItemKeys].filter((key) => valid.has(key)));
+}
+
+function galleryStatsText() {
+  const total = currentItems.length;
+  const visible = galleryViewItems.length;
+  const videos = galleryViewItems.filter((item) => item.type === "video").length;
+  const hd = galleryViewItems.filter(isHighResolutionItem).length;
+  const unknown = galleryViewItems.filter((item) => {
+    const { width, height } = itemDimensions(item);
+    return !width && !height;
+  }).length;
+  const thumbnails = filteredReportCount(/thumbnail|dimension <=540|miniatura/i);
+  const resourceNoise = filteredReportCount(/performance sin elemento visible/i);
+  const pieces = [
+    `${visible}/${total} visibles`,
+    `${hd} HD`,
+    `${videos} videos`,
+    `${unknown} sin medir`,
+  ];
+  if (thumbnails) pieces.push(`${thumbnails} miniaturas filtradas`);
+  if (resourceNoise) pieces.push(`${resourceNoise} recursos invisibles filtrados`);
+  if (galleryViewItems.length > 240) pieces.push("render virtualizado activo");
+  return pieces.join(" · ");
+}
+
+function auditSummaryText(audit) {
+  const thumbnails = filteredReportCount(/thumbnail|dimension <=540|miniatura/i);
+  const previewFailures = filteredReportCount(/preview no disponible/i);
+  const resourceNoise = filteredReportCount(/performance sin elemento visible/i);
+  const filteredParts = [];
+  if (thumbnails) filteredParts.push(`${thumbnails} miniatura${thumbnails === 1 ? "" : "s"}`);
+  if (previewFailures) filteredParts.push(`${previewFailures} preview${previewFailures === 1 ? "" : "s"} sin carga`);
+  if (resourceNoise) filteredParts.push(`${resourceNoise} recurso${resourceNoise === 1 ? "" : "s"} invisible${resourceNoise === 1 ? "" : "s"}`);
+
+  return [
+    `Auditadas ${audit.measured} resolucion${audit.measured === 1 ? "" : "es"} reales`,
+    filteredParts.length ? `filtradas ${filteredParts.join(", ")}` : `filtradas ${audit.filtered} miniatura${audit.filtered === 1 ? "" : "s"}`,
+  ].join("; ");
+}
+
+function updateFilterButtons() {
+  elements.filterChips.forEach((chip) => {
+    const active = galleryFilters[chip.dataset.filterGroup] === chip.dataset.filterValue;
+    chip.classList.toggle("is-active", active);
+    chip.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function updateGalleryControls() {
+  const selected = selectedItems();
+  const selectedVisible = visibleSelectedItems();
+  const zipCount = zipCandidateItems().length;
+  const hiddenByFilter = Math.max(0, currentItems.length - galleryViewItems.length);
+  const everyVisibleSelected =
+    galleryViewItems.length > 0 && galleryViewItems.every((item) => selectedItemKeys.has(itemKey(item)));
+  const hasActionableOutput = currentItems.length > 0 || lastGalleryReport.length > 0;
+
+  elements.actionRow.hidden = !hasActionableOutput;
+  elements.galleryToolbar.hidden = currentItems.length === 0;
+  elements.galleryEmpty.hidden = currentItems.length === 0 || galleryViewItems.length > 0;
+  elements.resultsCount.textContent = selected.length
+    ? `${galleryViewItems.length} visibles · ${selected.length} seleccionados`
+    : `${galleryViewItems.length} ${galleryViewItems.length === 1 ? "elemento" : "elementos"}${hiddenByFilter ? ` · ${hiddenByFilter} ocultos` : ""}`;
+  elements.selectionSummary.textContent = selected.length
+    ? `${selected.length} seleccionado${selected.length === 1 ? "" : "s"}${selectedVisible.length !== selected.length ? ` · ${selectedVisible.length} visible${selectedVisible.length === 1 ? "" : "s"}` : ""}`
+    : "Sin seleccion";
+  elements.clearSelection.disabled = selected.length === 0;
+  elements.selectVisible.disabled = galleryViewItems.length === 0;
+  elements.selectVisible.textContent = everyVisibleSelected ? "Quitar visibles" : "Seleccionar visibles";
+  elements.copyAll.disabled = currentItems.length === 0 || zipSourceItems().length === 0;
+  elements.loadCapture.disabled = isStaticPagesMode;
+  elements.upgradeQuality.disabled = currentItems.length === 0;
+  elements.downloadLarge.disabled = zipCount === 0;
+  elements.downloadLarge.textContent = selected.length > 0
+    ? zipCount > 0
+      ? isStaticPagesMode
+        ? `Descargar ${zipCount} directas`
+        : `Descargar ${zipCount} ZIP`
+      : "Sin elegibles ZIP"
+    : isStaticPagesMode
+      ? "Descargar directas >500"
+      : "Descargar >500 ZIP";
+  elements.downloadReport.disabled = currentItems.length === 0 && lastGalleryReport.length === 0;
+  elements.galleryStats.textContent = currentItems.length ? galleryStatsText() : "";
+  updateFilterButtons();
+}
+
+function galleryGridMetrics(total) {
+  const gap = 10;
+  const minWidth = window.matchMedia("(max-width: 620px)").matches ? 150 : 176;
+  const width = Math.max(elements.gallery.clientWidth || 0, minWidth);
+  const columns = Math.max(1, Math.floor((width + gap) / (minWidth + gap)));
+  const cardWidth = Math.max(minWidth, (width - gap * (columns - 1)) / columns);
+  const rowHeight = cardWidth + gap;
+  const totalRows = Math.ceil(total / columns);
+  return { columns, rowHeight, totalRows };
+}
+
+function spacer(height) {
+  const node = document.createElement("div");
+  node.className = "gallery-spacer";
+  node.style.height = `${Math.max(0, Math.round(height))}px`;
+  return node;
+}
+
+function createMediaCard(item, index) {
+  const node = elements.template.content.firstElementChild.cloneNode(true);
+  const preview = node.querySelector(".preview");
+  const download = document.createElement("a");
+  const select = document.createElement("button");
+  const status = document.createElement("span");
+  const error = document.createElement("div");
+  const retry = document.createElement("button");
+  const filename = filenameFor(item, index);
+  const key = itemKey(item);
+
+  preview.classList.add("m-clickable");
+  node.dataset.itemKey = key;
+  node.classList.toggle("is-selected", selectedItemKeys.has(key));
+  node.classList.toggle("is-error", Boolean(item.loadError));
+  node.setAttribute("aria-label", viewerCaptionFor(item, index, galleryViewItems.length));
+  node.title = [
+    viewerCaptionFor(item, index, galleryViewItems.length),
+    itemStatusLabel(item),
+    item.platform,
+    item.source,
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  preview.addEventListener("click", () => openMediaViewer(item, index, galleryViewItems));
+
+  select.className = "media-select";
+  select.type = "button";
+  select.setAttribute("aria-label", selectedItemKeys.has(key) ? "Quitar de seleccion" : "Seleccionar para ZIP");
+  select.setAttribute("aria-pressed", String(selectedItemKeys.has(key)));
+  select.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (selectedItemKeys.has(key)) {
+      selectedItemKeys.delete(key);
+    } else {
+      selectedItemKeys.add(key);
+    }
+    renderGallery();
+  });
+  preview.append(select);
+
+  status.className = "media-status";
+  status.textContent = itemStatusLabel(item);
+  preview.append(status);
+
+  let media;
+  if (item.type === "video") {
+    media = document.createElement("video");
+    media.src = item.url;
+    media.poster = item.previewUrl && item.previewUrl !== item.url ? item.previewUrl : "";
+    media.controls = false;
+    media.muted = true;
+    media.playsInline = true;
+    media.preload = "metadata";
+  } else {
+    media = document.createElement("img");
+    media.src = item.previewUrl || item.url;
+    media.alt = item.caption || viewerCaptionFor(item, index, galleryViewItems.length);
+    media.loading = "lazy";
+    media.decoding = "async";
+  }
+
+  media.addEventListener("error", () => {
+    item.loadError = true;
+    node.classList.add("is-error");
+    status.textContent = itemStatusLabel(item);
+    error.hidden = false;
+  });
+  media.addEventListener("load", () => {
+    item.loadError = false;
+    if (item.type === "image" && media.naturalWidth && media.naturalHeight && (!item.width || !item.height)) {
+      item.width = media.naturalWidth;
+      item.height = media.naturalHeight;
+    }
+    node.classList.remove("is-error");
+    status.textContent = itemStatusLabel(item);
+    error.hidden = true;
+    updateGalleryControls();
+  });
+  media.addEventListener("loadedmetadata", () => {
+    if (item.type !== "video") return;
+    item.loadError = false;
+    if (media.videoWidth && media.videoHeight && (!item.width || !item.height)) {
+      item.width = media.videoWidth;
+      item.height = media.videoHeight;
+      status.textContent = itemStatusLabel(item);
+      updateGalleryControls();
+    }
+  });
+  preview.append(media);
+
+  error.className = "media-error";
+  error.hidden = !item.loadError;
+  error.innerHTML = "<span>No cargo este item</span>";
+  retry.className = "tertiary";
+  retry.type = "button";
+  retry.textContent = "Reintentar";
+  retry.addEventListener("click", (event) => {
+    event.stopPropagation();
+    item.loadError = false;
+    error.hidden = true;
+    node.classList.remove("is-error");
+    const src = item.type === "video" ? item.url : item.previewUrl || item.url;
+    media.removeAttribute("src");
+    if (item.type === "video") media.load();
+    requestAnimationFrame(() => {
+      media.src = src;
+      if (item.type === "video") media.load();
+    });
+  });
+  error.append(retry);
+  preview.append(error);
+
+  download.className = "download-link";
+  configureDownloadLink(download, item, filename);
+  preview.append(download);
+  return node;
+}
+
+function renderGalleryWindow() {
+  galleryRenderRequest = 0;
+  const galleryTop = elements.gallery.getBoundingClientRect().top + window.scrollY;
+  elements.gallery.textContent = "";
+
+  const total = galleryViewItems.length;
+  if (total === 0) {
+    updateGalleryControls();
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  const shouldVirtualize = total > 240;
+  let startIndex = 0;
+  let endIndex = total;
+  let topHeight = 0;
+  let bottomHeight = 0;
+
+  if (shouldVirtualize) {
+    const metrics = galleryGridMetrics(total);
+    const viewportTop = window.scrollY;
+    const viewportBottom = viewportTop + window.innerHeight;
+    const overscanRows = 3;
+    const startRow = Math.max(0, Math.floor((viewportTop - galleryTop) / metrics.rowHeight) - overscanRows);
+    const endRow = Math.min(
+      metrics.totalRows,
+      Math.ceil((viewportBottom - galleryTop) / metrics.rowHeight) + overscanRows,
+    );
+
+    startIndex = Math.max(0, startRow * metrics.columns);
+    endIndex = Math.min(total, endRow * metrics.columns);
+    topHeight = startRow * metrics.rowHeight;
+    bottomHeight = Math.max(0, (metrics.totalRows - endRow) * metrics.rowHeight);
+  }
+
+  if (topHeight) fragment.append(spacer(topHeight));
+  galleryViewItems.slice(startIndex, endIndex).forEach((item, offset) => {
+    fragment.append(createMediaCard(item, startIndex + offset));
+  });
+  if (bottomHeight) fragment.append(spacer(bottomHeight));
+
+  elements.gallery.append(fragment);
+  updateGalleryControls();
+}
+
+function scheduleGalleryWindowRender() {
+  if (galleryRenderRequest) return;
+  galleryRenderRequest = requestAnimationFrame(renderGalleryWindow);
+}
+
+function renderGallery(items = currentItems) {
+  currentItems = items;
+  syncSelectedItems();
+  galleryViewItems = filteredGalleryItems();
+  scheduleGalleryWindowRender();
+}
+
+elements.filterChips.forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const group = chip.dataset.filterGroup;
+    if (!group) return;
+    galleryFilters[group] = chip.dataset.filterValue || "all";
+    renderGallery();
+  });
 });
 
-elements.copyQuery.addEventListener("click", async () => {
-  if (!elements.queryUrl.value) return;
-  await navigator.clipboard.writeText(elements.queryUrl.value);
-  setMessage("Consulta copiada.");
+elements.selectVisible.addEventListener("click", () => {
+  const everyVisibleSelected =
+    galleryViewItems.length > 0 && galleryViewItems.every((item) => selectedItemKeys.has(itemKey(item)));
+  galleryViewItems.forEach((item) => {
+    const key = itemKey(item);
+    if (everyVisibleSelected) {
+      selectedItemKeys.delete(key);
+    } else {
+      selectedItemKeys.add(key);
+    }
+  });
+  renderGallery();
 });
+
+elements.clearSelection.addEventListener("click", () => {
+  selectedItemKeys.clear();
+  renderGallery();
+});
+
+window.addEventListener(
+  "scroll",
+  () => {
+    if (galleryViewItems.length > 240) scheduleGalleryWindowRender();
+  },
+  { passive: true },
+);
+window.addEventListener("resize", scheduleGalleryWindowRender);
 
 elements.parseSource.addEventListener("click", async () => {
   const raw = elements.sourceInput.value;
@@ -1479,17 +2093,17 @@ elements.parseSource.addEventListener("click", async () => {
   }
 
   let parsed = parseMedia(raw);
+  selectedItemKeys.clear();
   currentItems = parsed;
   renderGallery(parsed);
   setMessage(`Auditando dimensiones reales de ${parsed.length} elemento(s)...`);
   const audit = await auditGalleryDimensions(parsed, "source");
   currentItems = audit.items;
   renderGallery(currentItems);
-  saveGalleryReport().catch(() => {});
   setMessage(
     currentItems.length > 0
-      ? `Encontre ${currentItems.length} elemento(s) utiles. Auditadas ${audit.measured} resoluciones reales; filtradas ${audit.filtered} miniaturas.`
-      : "No encontre media util tras auditar y filtrar miniaturas de 540 o menos.",
+      ? `Encontre ${currentItems.length} elemento(s) utiles. ${auditSummaryText(audit)}.`
+      : `No encontre media util. ${auditSummaryText(audit)}.`,
     currentItems.length === 0,
   );
 });
@@ -1510,8 +2124,8 @@ elements.loadCapture.addEventListener("click", async () => {
     return;
   }
 
-  elements.sourceInput.value = capture.body;
   let items = parseMedia(capture.body);
+  selectedItemKeys.clear();
   currentItems = items;
   renderGallery(items);
   setMessage(`Auditando dimensiones reales de ${items.length} elemento(s)...`);
@@ -1519,15 +2133,10 @@ elements.loadCapture.addEventListener("click", async () => {
   items = audit.items;
   currentItems = items;
   renderGallery(items);
-  saveGalleryReport().catch(() => {});
-  const source = capture.title ? `${capture.title} (${capture.url})` : capture.url;
-  if (!elements.postUrl.value.trim()) {
-    elements.postUrl.value = capture.url || "";
-  }
   setMessage(
     items.length > 0
-      ? `Use la captura local de ${new Date(capture.capturedAt).toLocaleTimeString()} y encontre ${items.length} elemento(s) utiles. Auditadas ${audit.measured} resoluciones reales; filtradas ${audit.filtered}. Captura: ${capture.mediaElementCount || 0} media visibles, ${(capture.resourceCount || 0) + (capture.elementCount || 0)} URLs unicas, ${capture.scrollSteps || capture.snapshots || 0} pasos de scroll. Fuente: ${source}`
-      : `La captura local llego desde ${source}, pero no encontre media util tras ignorar miniaturas de 540 o menos.`,
+      ? `Captura local lista: ${items.length} elemento(s) utiles. ${auditSummaryText(audit)}.`
+      : `La captura local no trajo media util. ${auditSummaryText(audit)}.`,
     items.length === 0,
   );
 });
@@ -1564,7 +2173,6 @@ elements.upgradeQuality.addEventListener("click", async () => {
 
     currentItems = sortMediaItems(filterSmallKnownItems(dedupeItems(results)));
     renderGallery(currentItems);
-    saveGalleryReport().catch(() => {});
     const failureText = [...failureSamples].filter(Boolean).slice(0, 2).join(" / ");
     setMessage(
       improved > 0
@@ -1583,14 +2191,15 @@ elements.upgradeQuality.addEventListener("click", async () => {
 });
 
 elements.downloadLarge.addEventListener("click", async () => {
-  const selectedItems = largeDownloadItems(currentItems);
-  if (selectedItems.length === 0) {
-    setMessage("No hay elementos descargables: imagenes >=500 x 500 o videos, siempre sin dimension 540.", true);
+  const zipItems = zipCandidateItems();
+  const selectedCount = selectedItems().length;
+  if (zipItems.length === 0) {
+    setMessage("No hay elementos descargables en la vista actual: imagenes >=500 x 500 o videos, siempre sin dimension 540.", true);
     return;
   }
 
   if (isStaticPagesMode) {
-    await downloadStaticItems(selectedItems);
+    await downloadStaticItems(zipItems);
     return;
   }
 
@@ -1608,12 +2217,14 @@ elements.downloadLarge.addEventListener("click", async () => {
   });
 
   try {
-    setMessage(`Preparando ZIP con ${selectedItems.length} elemento(s), excluyendo resoluciones 540x...`);
+    setMessage(
+      `Preparando ZIP con ${zipItems.length} elemento(s)${selectedCount ? " seleccionados" : " visibles"}, excluyendo resoluciones 540x...`,
+    );
     const response = await fetch("/api/download-zip", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        items: selectedItems.map((item, index) => {
+        items: zipItems.map((item, index) => {
           const { width, height } = itemDimensions(item);
           return {
             url: item.url,
@@ -1655,31 +2266,21 @@ elements.downloadReport.addEventListener("click", async () => {
 
   const report = buildGalleryReportText();
   downloadTextFile(`media-local-gallery-report-${Date.now()}.txt`, report);
-  const saved = await saveGalleryReport(report);
-  setMessage(
-    isStaticPagesMode
-      ? "Reporte TXT generado."
-      : saved
-      ? "Reporte TXT generado y guardado en logs/latest-gallery-report.txt."
-      : "Reporte TXT generado. No pude guardarlo en logs.",
-    !isStaticPagesMode && !saved,
-  );
+  setMessage("Reporte TXT generado en el navegador; no guarde historial local.");
 });
 
 elements.copyAll.addEventListener("click", async () => {
-  if (currentItems.length === 0) return;
-  await navigator.clipboard.writeText(currentItems.map((item) => item.url).join("\n"));
-  setMessage("URLs copiadas.");
+  const items = zipSourceItems();
+  if (items.length === 0) return;
+  await navigator.clipboard.writeText(items.map((item) => item.url).join("\n"));
+  setMessage(selectedItemKeys.size > 0 ? "URLs seleccionadas copiadas." : "URLs visibles copiadas.");
 });
 
 elements.clearAll.addEventListener("click", () => {
-  elements.postUrl.value = "";
-  elements.queryUrl.value = "";
-  elements.legacyUrl.value = "";
   elements.sourceInput.value = "";
-  elements.queryBox.hidden = true;
   currentItems = [];
   lastGalleryReport = [];
+  selectedItemKeys.clear();
   renderGallery([]);
   setMessage("");
   if (!isStaticPagesMode) {
@@ -1688,11 +2289,73 @@ elements.clearAll.addEventListener("click", () => {
 });
 
 elements.viewerClose.addEventListener("click", closeMediaViewer);
+elements.viewerPrev.addEventListener("click", () => goToViewerItem(-1));
+elements.viewerNext.addEventListener("click", () => goToViewerItem(1));
+elements.viewerZoomOut.addEventListener("click", () => zoomViewerBy(0.8));
+elements.viewerZoomReset.addEventListener("click", fitViewerMedia);
+elements.viewerZoomIn.addEventListener("click", () => zoomViewerBy(1.25));
+elements.viewerCopyUrl.addEventListener("click", async () => {
+  if (!viewerState.item?.url) return;
+  await navigator.clipboard.writeText(viewerState.item.url);
+  setMessage(`URL copiada: ${elements.viewerCaption.textContent}`);
+});
 elements.viewer.addEventListener("click", (event) => {
   if (event.target === elements.viewer) closeMediaViewer();
 });
+elements.viewerStage.addEventListener("click", (event) => {
+  if (event.target === elements.viewerStage) closeMediaViewer();
+});
+elements.viewerStage.addEventListener(
+  "wheel",
+  (event) => {
+    if (elements.viewer.hidden || viewerState.item?.type === "video") return;
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    zoomViewerBy(event.deltaY < 0 ? 1.12 : 0.88);
+  },
+  { passive: false },
+);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !elements.viewer.hidden) closeMediaViewer();
+  if (elements.viewer.hidden) return;
+
+  if (event.key === "Tab") {
+    trapViewerFocus(event);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    closeMediaViewer();
+    return;
+  }
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    goToViewerItem(-1);
+    return;
+  }
+
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    goToViewerItem(1);
+    return;
+  }
+
+  if (event.key === "+" || event.key === "=") {
+    event.preventDefault();
+    zoomViewerBy(1.25);
+    return;
+  }
+
+  if (event.key === "-" || event.key === "_") {
+    event.preventDefault();
+    zoomViewerBy(0.8);
+    return;
+  }
+
+  if (event.key === "0") {
+    event.preventDefault();
+    fitViewerMedia();
+  }
 });
 
 if (isStaticPagesMode) {
