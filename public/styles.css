@@ -36,12 +36,17 @@
 
 html {
   background: var(--bg);
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
   scrollbar-width: none;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
     linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
@@ -448,6 +453,13 @@ button:disabled {
   margin-top: 14px;
 }
 
+.gallery-grid.is-virtual {
+  display: block;
+  position: relative;
+  contain: layout paint style;
+  transform: translateZ(0);
+}
+
 .gallery-spacer {
   grid-column: 1 / -1;
   pointer-events: none;
@@ -464,6 +476,26 @@ button:disabled {
   transition:
     transform 160ms ease,
     filter 160ms ease;
+}
+
+.gallery-grid.is-virtual .media-card {
+  content-visibility: visible;
+  contain: layout paint;
+  left: 0;
+  position: absolute;
+  top: 0;
+  transform: var(--gallery-card-transform);
+}
+
+.gallery-grid.is-virtual .media-card:hover {
+  filter: none;
+  transform: var(--gallery-card-transform) translateY(-1px);
+}
+
+.gallery-grid.is-virtual .media-card:hover .preview img,
+.gallery-grid.is-virtual .media-card:hover .preview video {
+  filter: none;
+  transform: none;
 }
 
 .media-card.is-selected .preview {
@@ -500,7 +532,18 @@ button:disabled {
   background: rgba(0, 0, 0, 0.42);
   transition:
     filter 180ms ease,
+    opacity 160ms ease,
     transform 180ms ease;
+}
+
+.preview img.is-lazy,
+.preview video.is-lazy {
+  opacity: 0;
+}
+
+.preview img.is-loaded,
+.preview video.is-loaded {
+  opacity: 1;
 }
 
 .media-card:hover .preview img,
@@ -522,10 +565,9 @@ button:disabled {
   z-index: 2;
   border: 0;
   border-radius: 999px;
-  background: rgba(5, 6, 10, 0.34);
+  background: rgba(5, 6, 10, 0.58);
   color: var(--text);
   box-shadow: none;
-  backdrop-filter: blur(8px);
   opacity: 0.9;
   padding: 7px 9px;
   transform: translateY(0);
@@ -545,9 +587,8 @@ button:disabled {
   min-height: 28px;
   border: 0;
   border-radius: 999px;
-  background: rgba(5, 6, 10, 0.42);
+  background: rgba(5, 6, 10, 0.58);
   color: var(--text);
-  backdrop-filter: blur(8px);
   padding: 0;
 }
 
@@ -576,9 +617,8 @@ button:disabled {
   right: 8px;
   max-width: calc(100% - 52px);
   border-radius: 999px;
-  background: rgba(5, 6, 10, 0.36);
+  background: rgba(5, 6, 10, 0.58);
   color: var(--muted-strong);
-  backdrop-filter: blur(8px);
   font-size: 10px;
   font-weight: 900;
   line-height: 1;
@@ -750,10 +790,8 @@ button:disabled {
 .viewer-stage {
   min-width: 0;
   min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: auto;
+  display: block;
+  overflow: hidden;
   overscroll-behavior: contain;
   border: 0;
   border-radius: var(--radius);
@@ -765,6 +803,15 @@ button:disabled {
   padding: 2px;
   scrollbar-width: thin;
   scrollbar-color: rgba(57, 228, 157, 0.42) rgba(255, 255, 255, 0.05);
+}
+
+.viewer-frame {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .viewer-stage::-webkit-scrollbar {
@@ -784,11 +831,9 @@ button:disabled {
 }
 
 .viewer-stage.is-zoomed {
-  align-items: flex-start;
-  justify-content: flex-start;
+  scroll-behavior: auto;
 }
 
-.viewer-stage img,
 .viewer-stage video {
   display: block;
   max-width: 100%;
@@ -797,24 +842,35 @@ button:disabled {
   background: #000000;
   border-radius: calc(var(--radius) + 2px);
   box-shadow: 0 24px 90px rgba(0, 0, 0, 0.55);
-  transition:
-    width 160ms ease,
-    max-width 160ms ease,
-    max-height 160ms ease;
 }
 
 .viewer-stage img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  max-width: none;
+  max-height: none;
+  transform-origin: 0 0;
+  will-change: transform;
   cursor: zoom-in;
+  background: #000000;
+  border-radius: calc(var(--radius) + 2px);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.55);
   user-select: none;
+  touch-action: none;
+  -webkit-user-drag: none;
 }
 
 .viewer-stage.is-zoomed img {
-  max-width: none;
-  max-height: none;
   cursor: grab;
 }
 
 .viewer-stage.is-zoomed img:active {
+  cursor: grabbing;
+}
+
+.viewer-stage.is-panning img {
   cursor: grabbing;
 }
 

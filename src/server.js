@@ -219,6 +219,11 @@ function isAllowedDownloadUrl(url) {
   return url.protocol === "https:" && !isBlockedHostname(url.hostname);
 }
 
+function isAllowedPageResolveHost(hostname) {
+  const host = hostname.toLowerCase();
+  return host === "x.com" || host === "twitter.com" || host.endsWith(".twitter.com");
+}
+
 async function assertAllowedPublicHttpsUrl(url) {
   if (!isAllowedDownloadUrl(url)) {
     throw new Error("Only public HTTPS URLs are allowed");
@@ -717,6 +722,132 @@ async function streamHlsDownload(res, requestUrl, manifestUrl, response) {
     res.end();
   } catch {
     res.destroy();
+  }
+}
+
+function normalizeTwitterStatusUrl(value) {
+  const url = new URL(value);
+  if (!isAllowedPageResolveHost(url.hostname)) {
+    throw new Error("Only X/Twitter status URLs are supported");
+  }
+
+  const match = url.pathname.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)(?:\/(?:photo|video)\/\d+)?\/?$/);
+  if (!match) {
+    throw new Error("Only X/Twitter status URLs are supported");
+  }
+
+  url.hostname = "x.com";
+  url.pathname = `/${match[1]}/status/${match[2]}`;
+  url.search = "";
+  url.hash = "";
+  return { url, statusId: match[2] };
+}
+
+function normalizeTwitterResolvedMediaUrl(value) {
+  const clean = String(value || "")
+    .replace(/\\u0026/g, "&")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+    .replace(/[),.;\]}]+$/g, "");
+
+  try {
+    const url = new URL(clean);
+    if (url.hostname.toLowerCase() === "pbs.twimg.com" && /^\/media\//i.test(url.pathname)) {
+      const extensionMatch = url.pathname.match(/^\/media\/([^/.?#]+)\.(jpe?g|png|webp|gif)$/i);
+      if (extensionMatch) {
+        url.pathname = `/media/${extensionMatch[1]}`;
+        if (!url.searchParams.has("format")) {
+          url.searchParams.set("format", extensionMatch[2].toLowerCase().replace("jpeg", "jpg"));
+        }
+      }
+      url.searchParams.set("name", "orig");
+    }
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function extractTwitterPageMedia(html, statusId) {
+  const normalized = String(html || "")
+    .replace(/\\u0026/g, "&")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&");
+  const media = new Map();
+  const patterns = [
+    /https?:\/\/pbs\.twimg\.com\/media\/[^\s"'<>\\)]+/gi,
+    /https?:\/\/video\.twimg\.com\/[^\s"'<>\\)]+?\.(?:m3u8?|m4v|mov|mp4|webm)(?:\?[^"'<>\\)\s]*)?/gi,
+  ];
+
+  patterns.forEach((pattern) => {
+    for (const match of normalized.matchAll(pattern)) {
+      const url = normalizeTwitterResolvedMediaUrl(match[0]);
+      if (!url) continue;
+      media.set(url, {
+        url,
+        type: /\.(m3u8?|m4v|mov|mp4|webm)(?:$|[?#])/i.test(url) ? "video" : "image",
+        statusId,
+      });
+    }
+  });
+
+  return [...media.values()];
+}
+
+async function handleResolvePageMedia(req, res, requestUrl) {
+  if (req.method !== "GET") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  const raw = requestUrl.searchParams.get("url");
+  if (!raw) {
+    sendJson(res, 400, { ok: false, error: "Missing url parameter" });
+    return;
+  }
+
+  let resolved;
+  try {
+    resolved = normalizeTwitterStatusUrl(raw);
+    await assertAllowedPublicHttpsUrl(resolved.url);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  try {
+    const { response, finalUrl } = await safeFetchPublicHttps(
+      resolved.url,
+      {
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari",
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "es-ES,es;q=0.9,en;q=0.8",
+        },
+      },
+      20000,
+    );
+
+    if (!response.ok || !response.body) {
+      sendJson(res, 200, {
+        ok: false,
+        url: finalUrl.toString(),
+        status: response.status || 502,
+        error: `X status returned ${response.status || "an error"}`,
+      });
+      return;
+    }
+
+    const text = await readResponseText(response, 2 * 1024 * 1024);
+    sendJson(res, 200, {
+      ok: true,
+      url: finalUrl.toString(),
+      statusId: resolved.statusId,
+      media: extractTwitterPageMedia(text, resolved.statusId),
+    });
+  } catch (error) {
+    sendJson(res, 200, { ok: false, error: `Could not resolve page media: ${error.message}` });
   }
 }
 
@@ -1223,6 +1354,11 @@ const server = createServer(async (req, res) => {
 
   if (requestUrl.pathname === "/api/probe") {
     await handleProbe(req, res, requestUrl);
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/resolve-page-media") {
+    await handleResolvePageMedia(req, res, requestUrl);
     return;
   }
 

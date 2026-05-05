@@ -1,0 +1,277 @@
+Optimizacion de galeria virtual - Media Local Gallery
+Fecha: 2026-05-05
+
+Resumen corto
+-------------
+La app tenia que soportar capturas grandes sin sentirse pesada. El problema no era una sola cosa:
+habia demasiados nodos, demasiadas imagenes cargando a la vez, re-renderes en scroll, efectos CSS caros
+y trabajo de audit/resolucion corriendo antes de que la UI pudiera respirar.
+
+La optimizacion final separa tres cosas:
+1. Datos disponibles: todos los items encontrados.
+2. DOM activo: solo las tarjetas cercanas al viewport.
+3. Media cargada: solo thumbnails/previews necesarios para ver y hacer scroll fluido.
+
+Cambios exactos realizados
+--------------------------
+1. Virtualizacion de la galeria
+   Archivo: public/app.js
+
+   Se agregaron constantes de control:
+   - GALLERY_VIRTUALIZE_AT = 360
+   - GALLERY_OVERSCAN_ROWS = 5
+   - GALLERY_WINDOW_ROW_STEP = 4
+   - GALLERY_LAZY_ROOT_MARGIN = "650px 0px"
+   - GALLERY_IMMEDIATE_LOAD_MARGIN = 420
+   - GALLERY_EAGER_MEDIA_COUNT = 20
+   - GALLERY_CARD_CACHE_LIMIT = 900
+
+   Antes, la app renderizaba muchas tarjetas o reconstruia una ventana virtual con demasiada frecuencia.
+   Ahora, si hay mas de 360 items, solo se renderiza una ventana cercana al viewport.
+
+2. Scroll virtual por bandas
+   Archivo: public/app.js
+   Funcion: renderGalleryWindow()
+
+   Antes la ventana virtual cambiaba casi fila por fila. Eso metia mutaciones DOM constantes.
+   Ahora el calculo de startRow/endRow se agrupa por GALLERY_WINDOW_ROW_STEP = 4.
+   Resultado: menos cambios de DOM durante scroll y menos trabajo por frame.
+
+3. Reuso/cache de tarjetas
+   Archivo: public/app.js
+   Variables/funciones:
+   - galleryCardCache
+   - galleryActiveCardKeys
+   - galleryCardCacheVersion
+   - galleryCardCacheKey()
+   - pruneGalleryCardCache()
+   - releaseGalleryCard()
+   - syncGalleryCardCacheVersion()
+
+   Antes, al cambiar la ventana virtual se destruian y recreaban nodos.
+   Eso causaba flashes negros porque los img volvian a entrar en estado lazy.
+
+   Ahora las tarjetas se reciclan:
+   - Si una tarjeta ya existe en cache, se reutiliza.
+   - Si sale del viewport, se remueve del DOM pero queda en cache.
+   - Si vuelve a entrar, se reinsertan los mismos nodos.
+   - La cache se limita a 900 tarjetas para no inflar memoria indefinidamente.
+
+4. Evitar flash negro de imagenes ya cargadas
+   Archivo: public/app.js
+   Variable:
+   - loadedGalleryMediaSources
+
+   Cuando una imagen/video carga, se guarda su fuente en loadedGalleryMediaSources.
+   Si esa misma fuente vuelve a aparecer, no se marca otra vez como is-lazy.
+   Resultado: al subir/bajar, no se apagan todas las imagenes.
+
+5. Lazy loading real con IntersectionObserver
+   Archivo: public/app.js
+   Funciones:
+   - ensureLazyMediaObserver()
+   - attachLazyMedia()
+   - loadLazyMedia()
+
+   En vez de asignar src a todo de golpe, las tarjetas guardan data-src y solo cargan cuando estan cerca.
+   Esto baja el costo inicial y evita saturar red/decodificacion.
+
+6. Carga inmediata solo de media cercana
+   Archivo: public/app.js
+   Funcion:
+   - loadNearbyGalleryMedia()
+
+   En la ventana virtual ya no se cargan todas las imagenes de overscan.
+   Solo se cargan inmediatamente las que estan cerca del viewport.
+   El resto queda preparado para el observer.
+
+7. Render inicial usable antes del audit
+   Archivo: public/app.js
+   Funciones:
+   - runGalleryAudit()
+   - yieldToPaint()
+
+   Antes, la UI podia esperar audit/resolucion antes de sentirse lista.
+   Ahora la galeria aparece primero y el audit corre en segundo plano.
+   yieldToPaint permite que el navegador pinte antes de iniciar trabajo pesado.
+
+8. Resolucion de links extra en segundo plano
+   Archivo: public/app.js
+   Funcion:
+   - resolveAndMergePageMedia()
+
+   Los enlaces extra de X/status se resuelven despues del primer render.
+   Si aparecen nuevos items, se mezclan y se vuelve a auditar sin bloquear la UI inicial.
+
+9. Previews livianos para X/Twitter
+   Archivo: public/app.js
+   Funciones:
+   - displayPreviewUrl()
+   - normalizeTwitterMediaUrl()
+   - mediaItemFromUrl()
+   - collectStructuredMedia()
+   - improveItemQuality()
+
+   Para pbs.twimg.com/media:
+   - La URL real del item se mantiene en name=orig para visor, descarga y audit.
+   - La grilla usa previewUrl con name=small.
+
+   Esto es clave: decodificar cientos de imagenes "orig" en una grilla mata FPS.
+   Usar small en la grilla mantiene la experiencia ligera sin sacrificar descarga/calidad.
+
+10. Audit usando la URL real, no el thumbnail
+    Archivo: public/app.js
+    Funcion:
+    - probeRealDimensions()
+
+    Como la grilla usa preview pequeno, el audit se cambio para medir item.url.
+    Asi la app sigue sabiendo la resolucion real aunque el thumbnail sea liviano.
+
+11. Evitar recalculo de controles en scroll
+    Archivo: public/app.js
+    Funcion:
+    - renderGallery()
+
+    Antes updateGalleryControls() podia ejecutarse dentro de render de ventana virtual.
+    Eso recalculaba seleccionados, ZIP, stats, HD, unknown, filtros, etc. durante scroll.
+    Ahora se actualizan controles cuando cambia el dataset/filtros/estado, no por cada ventana de scroll.
+
+12. CSS mas barato en modo virtual
+    Archivo: public/styles.css
+
+    Cambios principales:
+    - .gallery-grid.is-virtual usa contain: layout paint style y transform: translateZ(0).
+    - .gallery-grid.is-virtual .media-card usa posicion absoluta y transform.
+    - Se quito will-change masivo de cada tarjeta virtual.
+    - En modo virtual se desactivaron filtros hover caros:
+      - filter: drop-shadow
+      - filter: saturate/contrast
+      - transform extra de media en hover
+    - Se quitaron backdrop-filter por tarjeta en botones/status de la grilla.
+
+    Importante: "usar GPU" no significa poner will-change a todo.
+    Demasiadas capas GPU pueden empeorar memoria y FPS. La mejora real fue reducir trabajo de main thread,
+    paint y decodificacion.
+
+Mediciones realizadas
+---------------------
+Con la captura actual de X:
+
+Antes de la optimizacion fuerte:
+- Scroll estable, pero muchas tarjetas en DOM.
+- Al virtualizar, aparecia flash negro porque se recreaban nodos.
+- Primer recorrido se sentia alrededor de 20-30 FPS.
+
+Despues:
+- DOM activo aproximado: 120 tarjetas, no cientos/miles.
+- Scroll por zona cacheada: ~143 FPS en prueba sintetica.
+- Primer recorrido por zona nueva: subio aprox. de 28 FPS a 39 FPS en prueba agresiva.
+- Las fuentes de grilla usan name=small.
+- El visor/descarga/audit conservan name=orig.
+- Lazy visible al volver a zonas ya vistas: 0.
+
+Por que el primer recorrido nunca sera igual al segundo
+------------------------------------------------------
+La primera vez que bajas por una zona, el navegador todavia tiene que:
+- Descargar thumbnails.
+- Decodificar imagenes.
+- Insertar algunos nodos nuevos.
+- Pintar nueva zona.
+
+La segunda vez, casi todo ya esta cacheado y decodificado, por eso el FPS sube muchisimo.
+
+Esto sirve para cualquier otra pagina?
+--------------------------------------
+Si, pero no como copy/paste literal. Sirve como patron para cualquier pagina con:
+- Galerias grandes.
+- Tablas grandes.
+- Listas largas.
+- Dashboards con muchas filas/cards.
+- Feed infinito.
+- Muchas imagenes o media pesada.
+
+Lo que se reutiliza:
+- Virtualizacion/windowing.
+- Reuso de nodos.
+- Lazy loading con IntersectionObserver.
+- Thumbnails livianos para grilla y originales solo para visor/descarga.
+- Trabajo pesado en background.
+- Evitar blur/filtros/sombras caras durante scroll.
+- Evitar recalcular stats/controles por cada scroll.
+
+Lo que cambia segun la pagina:
+- En una tabla no se usan thumbnails, se virtualizan filas.
+- En un dashboard se memoizan cards y se evitan renders globales.
+- En una app con charts se pausa/debouncean recalculos durante scroll.
+- En una pagina con imagenes se deben servir versiones pequenas en tarjetas.
+- En React/Vue/Svelte conviene usar virtualizer de framework o una implementacion equivalente.
+
+Revision rapida de las paginas mencionadas
+------------------------------------------
+1. https://melor.netlify.app/
+   - Responde 200.
+   - Titulo HTML: MOR.
+   - Es una SPA con un bundle JS: /assets/index-D7M1AJo9.js.
+   - El HTML inicial no trae imagenes estaticas.
+
+   Aplicabilidad:
+   - Si MOR tiene grids, listas, galerias o feeds grandes en runtime, si aplica.
+   - Si es una pagina corta o solo interactiva sin listas largas, esta optimizacion no tendria impacto grande.
+   - Para aplicarlo bien habria que perfilar el bundle/runtime y ubicar el componente que renderiza muchos nodos.
+
+2. https://cerodeudaprix.netlify.app/
+   - Responde 200.
+   - Titulo HTML: Grand Prix.
+   - Tiene app.js y share-tools.js.
+   - El HTML muestra dashboard, tabla completa y datos de equipos/clasificacion.
+
+   Aplicabilidad:
+   - Si la tabla completa llega a tener muchas filas, si aplica mucho.
+   - Aqui el patron correcto seria virtualizar filas de tabla, no tarjetas de media.
+   - Tambien serviria evitar recalcular posiciones, countdowns, stats y estilos globales en cada update si hay mucha data.
+   - Como tiene dashboard, hay que cuidar filtros, sticky headers, rankings, animaciones y timers para que no fuerzen re-render completo.
+
+Checklist para aplicar este patron en otra app
+----------------------------------------------
+1. Medir antes:
+   - Cuantos nodos hay?
+   - Que se recalcula al hacer scroll?
+   - Hay imagenes gigantes en thumbnails?
+   - Hay filtros CSS, blur o sombras en muchos elementos?
+   - Hay timers o listeners actualizando toda la UI?
+
+2. Separar datos de DOM:
+   - Mantener todos los datos en memoria.
+   - Renderizar solo lo visible + overscan.
+
+3. Separar thumbnail de original:
+   - Thumbnail para grilla/lista.
+   - Original solo en visor/descarga/export.
+
+4. Reducir trabajo de scroll:
+   - No recalcular stats en cada scroll.
+   - No reconstruir todo el DOM.
+   - Cambiar ventana por bloques, no por pixel/fila.
+
+5. Reducir paint/composicion:
+   - Evitar backdrop-filter en muchos items.
+   - Evitar drop-shadow/filter en scroll.
+   - Usar contain.
+   - Usar transform con criterio.
+   - No abusar de will-change.
+
+6. Validar con numeros:
+   - FPS aproximado.
+   - Cantidad de nodos activos.
+   - Mutaciones DOM durante scroll.
+   - Imagenes con src activo.
+   - Lazy visibles.
+
+Referencias tecnicas usadas
+---------------------------
+- MDN Lazy loading: https://developer.mozilla.org/en-US/docs/Web/Performance/Guides/Lazy_loading
+- MDN IntersectionObserver: https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API
+- MDN content-visibility: https://developer.mozilla.org/en-US/docs/Web/CSS/content-visibility
+- MDN will-change: https://developer.mozilla.org/en-US/docs/Web/CSS/will-change
+- web.dev long tasks: https://web.dev/articles/optimize-long-tasks
+
