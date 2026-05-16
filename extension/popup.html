@@ -39,6 +39,27 @@
         margin-top: 8px;
       }
 
+      label {
+        display: grid;
+        gap: 5px;
+        margin: 0 0 10px;
+        color: #415149;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #cad4cf;
+        border-radius: 8px;
+        background: white;
+        color: #17211c;
+        font: inherit;
+        font-size: 12px;
+        padding: 9px 10px;
+      }
+
       a {
         box-sizing: border-box;
         margin-top: 8px;
@@ -57,9 +78,13 @@
   </head>
   <body>
     <h1>Media Local Gallery</h1>
+    <label>
+      App destino
+      <input id="app-url" type="url" spellcheck="false" />
+    </label>
     <button id="capture" type="button">Capturar visible</button>
     <button id="deep-capture" type="button">Captura profunda con scroll</button>
-    <a href="http://127.0.0.1:5177" target="_blank" rel="noreferrer">Abrir app local</a>
+    <a id="open-app" href="https://instakeep-troghx.netlify.app" target="_blank" rel="noreferrer">Abrir app</a>
     <p id="status">Captura solo cuando pulsas el boton.</p>
     <script src="popup.js"></script>
   </body>

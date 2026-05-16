@@ -99,7 +99,10 @@ let viewerState = {
   returnFocus: null,
 };
 const dimensionProbeCache = new Map();
-const isStaticPagesMode = !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+const isLocalServerMode = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+const isGitHubPagesMode = window.location.hostname.endsWith(".github.io");
+const hasServerApi = isLocalServerMode || (!isGitHubPagesMode && /^https?:$/.test(window.location.protocol));
+const isStaticPagesMode = !hasServerApi;
 
 function setMessage(text, isError = false) {
   elements.message.textContent = text;
@@ -128,9 +131,9 @@ function scheduleGalleryControlsUpdate() {
 }
 
 function needsLocalServer(action) {
-  if (!isStaticPagesMode) return false;
+  if (hasServerApi) return false;
   setMessage(
-    `${action} necesita el servidor local con npm start. GitHub Pages no puede leer capturas locales ni cookies de otras paginas.`,
+    `${action} necesita backend: usa npm start en local o abre la version Netlify. GitHub Pages no puede recibir capturas ni actuar como proxy.`,
     true,
   );
   return true;
@@ -511,28 +514,124 @@ function isDirectJsonText(value) {
 }
 
 function extractJsonFromHtml(value) {
+  const rawText = String(value || "").trim();
   const normalized = normalizeEscapes(value);
   const documents = [];
-  if (isDirectJsonText(normalized)) {
-    const parsed = tryParseJson(normalized);
-    if (parsed) return [parsed];
+  const seenDocuments = new Set();
+
+  function addDocument(text) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) return;
+    const signature = `${trimmed.length}:${trimmed.slice(0, 120)}`;
+    if (seenDocuments.has(signature)) return;
+    seenDocuments.add(signature);
+    documents.push(trimmed);
   }
+
+  function addScriptDocuments(source) {
+    for (const match of String(source || "").matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+      const text = match[1].trim();
+      if (text.startsWith("{") || text.startsWith("[")) addDocument(text);
+      const additionalData = text.match(/__additionalDataLoaded\([^,]+,\s*(\{[\s\S]*\})\);?/);
+      if (additionalData) addDocument(additionalData[1]);
+    }
+  }
+
+  if (isDirectJsonText(rawText)) addDocument(rawText);
+  if (normalized !== rawText && isDirectJsonText(normalized)) addDocument(normalized);
 
   try {
     const doc = new DOMParser().parseFromString(normalized, "text/html");
     doc.querySelectorAll("script").forEach((script) => {
       const text = script.textContent.trim();
-      if (text.startsWith("{") || text.startsWith("[")) {
-        documents.push(text);
-      }
+      if (text.startsWith("{") || text.startsWith("[")) addDocument(text);
       const additionalData = text.match(/__additionalDataLoaded\([^,]+,\s*(\{[\s\S]*\})\);?/);
-      if (additionalData) documents.push(additionalData[1]);
+      if (additionalData) addDocument(additionalData[1]);
     });
   } catch {
     // Source was not HTML.
   }
 
+  addScriptDocuments(value);
+  addScriptDocuments(normalized);
   return documents.map(tryParseJson).filter(Boolean);
+}
+
+function isNestedDocumentCandidate(value) {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  if (text.length < 80 || text.length > 45_000_000) return false;
+  return /^(?:[\[{])|<script|__additionalDataLoaded|carousel_media|edge_sidecar_to_children|xdt_api__v1__media__shortcode__web_info/i.test(
+    text,
+  );
+}
+
+function extractNestedJsonDocuments(roots) {
+  const documents = [];
+  const seenObjects = new WeakSet();
+  const seenStrings = new Set();
+  const preferredDocumentKeys = new Set(["body", "html", "pageHtml", "source", "sourceHtml"]);
+
+  function rememberDocuments(value) {
+    if (!isNestedDocumentCandidate(value)) return;
+    const signature = `${value.length}:${value.slice(0, 240)}`;
+    if (seenStrings.has(signature)) return;
+    seenStrings.add(signature);
+    documents.push(...extractJsonFromHtml(value));
+  }
+
+  function walk(node, depth = 0) {
+    if (!node || typeof node !== "object" || seenObjects.has(node) || depth > 4) return;
+    seenObjects.add(node);
+
+    Object.entries(node).forEach(([key, value]) => {
+      if (typeof value === "string") {
+        if (preferredDocumentKeys.has(key) || /html|body|source/i.test(key)) rememberDocuments(value);
+        return;
+      }
+
+      if (value && typeof value === "object") walk(value, depth + 1);
+    });
+  }
+
+  roots.forEach((root) => walk(root));
+  return documents;
+}
+
+function instagramShortcodeFromUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!hostMatches(url.hostname, "instagram.com")) return "";
+    const match = url.pathname.match(/\/(?:[^/]+\/)?(?:p|reel|tv)\/([A-Za-z0-9_-]+)/i);
+    return match?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function isInstagramProfileCapture(roots) {
+  return roots.some((root) => {
+    try {
+      const url = new URL(root?.url || root?.href || root?.canonicalUrl || "");
+      if (!hostMatches(url.hostname, "instagram.com")) return false;
+      return /^\/[A-Za-z0-9._]+\/?$/.test(url.pathname);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function activeInstagramShortcode(roots) {
+  for (const root of roots) {
+    const shortcode = instagramShortcodeFromUrl(root?.url || root?.href || root?.canonicalUrl || "");
+    if (shortcode) return shortcode;
+  }
+  return "";
+}
+
+function filterStructuredMediaForActivePost(items, shortcode) {
+  if (!shortcode) return items;
+  return items.filter((item) => item.shortcode === shortcode);
 }
 
 function bestResource(resources, mediaType = "") {
@@ -617,6 +716,7 @@ function collectStructuredMedia(root) {
           ...context,
           parentShortcode: node.shortcode || node.code || context.parentShortcode,
           carouselIndex: index + 1,
+          carouselTotal: children.length,
         }),
       );
       return;
@@ -681,6 +781,8 @@ function collectStructuredMedia(root) {
         width: resource.width || node.dimensions?.width || node.original_width || dimensions.width || 0,
         height: resource.height || node.dimensions?.height || node.original_height || dimensions.height || 0,
         shortcode: node.shortcode || node.code || context.parentShortcode || "",
+        carouselIndex: context.carouselIndex || 0,
+        carouselTotal: context.carouselTotal || 0,
         caption: textCaption(node),
         platform: platformFromUrl(resource.url),
         source: context.carouselIndex ? `carousel ${context.carouselIndex}` : "structured",
@@ -1004,8 +1106,69 @@ function filterItemsWithReport(items, rows) {
   return accepted;
 }
 
+function carouselIndexForItem(item) {
+  return Number(item?.carouselIndex || 0);
+}
+
+function carouselGroupKey(item) {
+  const index = carouselIndexForItem(item);
+  const shortcode = String(item?.shortcode || "");
+  return shortcode && index > 0 ? shortcode : "";
+}
+
+function carouselTotalForItem(item, items = currentItems) {
+  const explicitTotal = Number(item?.carouselTotal || 0);
+  if (explicitTotal > 0) return explicitTotal;
+
+  const key = carouselGroupKey(item);
+  if (!key) return 0;
+  return items.filter((candidate) => carouselGroupKey(candidate) === key).length;
+}
+
+function carouselPositionLabel(item, items = currentItems) {
+  const index = carouselIndexForItem(item);
+  if (!carouselGroupKey(item) || index <= 0) return "";
+  const total = carouselTotalForItem(item, items);
+  return `${index}/${total || "?"}`;
+}
+
 function sortMediaItems(items) {
-  return [...items].sort((a, b) => mediaQualityRank(b) - mediaQualityRank(a));
+  const carouselGroups = new Map();
+  items.forEach((item, originalIndex) => {
+    const key = carouselGroupKey(item);
+    if (!key) return;
+
+    const previous = carouselGroups.get(key);
+    const rank = mediaQualityRank(item);
+    if (!previous) {
+      carouselGroups.set(key, { firstIndex: originalIndex, rank });
+      return;
+    }
+
+    previous.rank = Math.max(previous.rank, rank);
+    previous.firstIndex = Math.min(previous.firstIndex, originalIndex);
+  });
+
+  return [...items]
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => {
+      const aCarouselKey = carouselGroupKey(a.item);
+      const bCarouselKey = carouselGroupKey(b.item);
+      if (aCarouselKey && aCarouselKey === bCarouselKey) {
+        return carouselIndexForItem(a.item) - carouselIndexForItem(b.item) || a.originalIndex - b.originalIndex;
+      }
+
+      const aGroup = carouselGroups.get(aCarouselKey);
+      const bGroup = carouselGroups.get(bCarouselKey);
+      const aRank = aGroup?.rank ?? mediaQualityRank(a.item);
+      const bRank = bGroup?.rank ?? mediaQualityRank(b.item);
+      if (aRank !== bRank) return bRank - aRank;
+
+      if (aGroup && bGroup) return aGroup.firstIndex - bGroup.firstIndex;
+      if (aGroup || bGroup) return (aGroup?.firstIndex ?? a.originalIndex) - (bGroup?.firstIndex ?? b.originalIndex);
+      return a.originalIndex - b.originalIndex;
+    })
+    .map(({ item }) => item);
 }
 
 function mediaItemFromUrl(url, source, extra = {}) {
@@ -1022,6 +1185,8 @@ function mediaItemFromUrl(url, source, extra = {}) {
     width: Number(extra.width || dimensions.width || 0),
     height: Number(extra.height || dimensions.height || 0),
     shortcode: extra.shortcode || "",
+    carouselIndex: Number(extra.carouselIndex || 0),
+    carouselTotal: Number(extra.carouselTotal || 0),
     caption: extra.caption || "",
     platform: extra.platform || platformFromUrl(upgraded),
     source,
@@ -1120,7 +1285,12 @@ function collectCapturedMediaElements(root) {
     if (!url) return;
     const width = Number(value.width || value.naturalWidth || value.videoWidth || 0);
     const height = Number(value.height || value.naturalHeight || value.videoHeight || 0);
-    const item = mediaItemFromUrl(url, "capture-element", { width, height });
+    const item = mediaItemFromUrl(url, "capture-element", {
+      width,
+      height,
+      shortcode: value?.shortcode,
+      caption: value?.caption,
+    });
     if (item) items.push(item);
   }
 
@@ -1141,15 +1311,67 @@ function collectCapturedMediaElements(root) {
   return items;
 }
 
+function collectCapturedStructuredMedia(root) {
+  const items = [];
+  const seenObjects = new WeakSet();
+
+  function addStructuredMedia(value) {
+    const item = mediaItemFromUrl(value?.url, "structured-capture", {
+      width: value?.width,
+      height: value?.height,
+      previewUrl: value?.previewUrl,
+      shortcode: value?.shortcode,
+      carouselIndex: value?.carouselIndex,
+      carouselTotal: value?.carouselTotal,
+      caption: value?.caption,
+    });
+    if (item) items.push(item);
+  }
+
+  function walk(node) {
+    if (!node || typeof node !== "object" || seenObjects.has(node)) return;
+    seenObjects.add(node);
+
+    if (Array.isArray(node.structuredMedia)) {
+      node.structuredMedia.forEach(addStructuredMedia);
+    }
+
+    Object.values(node).forEach((value) => {
+      if (value && typeof value === "object") walk(value);
+    });
+  }
+
+  walk(root);
+  return items;
+}
+
 function parseMediaDetailed(raw) {
   const jsonRoots = extractJsonFromHtml(raw);
+  const nestedJsonRoots = extractNestedJsonDocuments(jsonRoots);
+  const structuredRoots = [...jsonRoots, ...nestedJsonRoots];
+  const activeShortcode = activeInstagramShortcode(jsonRoots);
+  const isProfileCapture = isInstagramProfileCapture(jsonRoots);
   const captureContext = collectCaptureUrlContext(jsonRoots);
   const captureItems = jsonRoots.flatMap(collectCapturedMediaElements);
-  const structured = jsonRoots.flatMap(collectStructuredMedia);
+  const captureStructured = jsonRoots.flatMap(collectCapturedStructuredMedia);
+  const structured = filterStructuredMediaForActivePost(
+    [...captureStructured, ...structuredRoots.flatMap(collectStructuredMedia)],
+    activeShortcode,
+  );
   const domItems = extractDomMedia(raw);
   const regexItems = extractUrlCandidates(raw);
   const reportRows = [];
-  const deduped = dedupeItemsWithReport([...captureItems, ...structured, ...domItems, ...regexItems], reportRows);
+  const structuredShortcodes = new Set(structured.map((item) => item.shortcode).filter(Boolean));
+  const profilePostCovers = captureItems.filter(
+    (item) => item.shortcode && !structuredShortcodes.has(item.shortcode),
+  );
+  const candidateItems =
+    activeShortcode && structured.length > 0
+      ? structured
+      : isProfileCapture && structured.length > 0
+        ? [...structured, ...profilePostCovers]
+        : [...structured, ...captureItems, ...domItems, ...regexItems];
+  const deduped = dedupeItemsWithReport(candidateItems, reportRows);
   const withoutResourceNoise = filterCaptureResourceNoise(deduped, reportRows, captureContext);
   const filtered = filterItemsWithReport(withoutResourceNoise, reportRows);
   const items = sortMediaItems(filtered);
@@ -1752,7 +1974,8 @@ function extensionForItem(item) {
 function filenameFor(item, index) {
   const ext = extensionForItem(item);
   const shortcode = item.shortcode ? `-${item.shortcode}` : "";
-  return `${item.platform || "media"}${shortcode}-${String(index + 1).padStart(2, "0")}.${ext}`;
+  const sequence = carouselIndexForItem(item) || index + 1;
+  return `${item.platform || "media"}${shortcode}-${String(sequence).padStart(2, "0")}.${ext}`;
 }
 
 function clickDownloadLink(href, filename = "", target = "") {
@@ -1804,7 +2027,9 @@ async function downloadStaticItems(items) {
 
 function viewerCaptionFor(item, index, totalItems = currentItems.length || index + 1) {
   const total = totalItems || index + 1;
-  return `${item.type === "video" ? "Video" : "Imagen"} ${index + 1}/${total}`;
+  const carouselPosition = carouselPositionLabel(item, galleryViewItems.length ? galleryViewItems : currentItems);
+  const prefix = carouselPosition ? `Carrusel ${carouselPosition} · ` : "";
+  return `${prefix}${item.type === "video" ? "Video" : "Imagen"} ${index + 1}/${total}`;
 }
 
 function clampZoom(value) {
@@ -2245,6 +2470,7 @@ function galleryStatsText() {
   const visible = galleryViewItems.length;
   const videos = galleryViewItems.filter((item) => item.type === "video").length;
   const hd = galleryViewItems.filter(isHighResolutionItem).length;
+  const carouselGroups = new Set(galleryViewItems.map(carouselGroupKey).filter(Boolean));
   const unknown = galleryViewItems.filter((item) => {
     const { width, height } = itemDimensions(item);
     return !width && !height;
@@ -2259,6 +2485,7 @@ function galleryStatsText() {
   ];
   if (thumbnails) pieces.push(`${thumbnails} miniaturas filtradas`);
   if (resourceNoise) pieces.push(`${resourceNoise} recursos invisibles filtrados`);
+  if (carouselGroups.size) pieces.push(`${carouselGroups.size} carrusel${carouselGroups.size === 1 ? "" : "es"} ligado${carouselGroups.size === 1 ? "" : "s"}`);
   if (galleryViewItems.length > GALLERY_VIRTUALIZE_AT) pieces.push("render virtualizado activo");
   return pieces.join(" · ");
 }
@@ -2304,8 +2531,8 @@ async function runGalleryAudit(items, label = "galeria") {
     renderGallery(currentItems);
     setMessage(
       currentItems.length > 0
-        ? `${label === "capture" ? "Captura local" : "Galeria manual"} lista: ${currentItems.length} elemento(s) utiles. ${auditSummaryText(audit)}.`
-        : `${label === "capture" ? "La captura local" : "La galeria manual"} no trajo media util. ${auditSummaryText(audit)}.`,
+        ? `${label === "capture" ? "Captura" : "Galeria manual"} lista: ${currentItems.length} elemento(s) utiles. ${auditSummaryText(audit)}.`
+        : `${label === "capture" ? "La captura" : "La galeria manual"} no trajo media util. ${auditSummaryText(audit)}.`,
       currentItems.length === 0,
     );
   } catch (error) {
@@ -2344,7 +2571,7 @@ function updateGalleryControls() {
   elements.selectVisible.disabled = galleryViewItems.length === 0;
   elements.selectVisible.textContent = everyVisibleSelected ? "Quitar visibles" : "Seleccionar visibles";
   elements.copyAll.disabled = currentItems.length === 0 || zipSourceItems().length === 0;
-  elements.loadCapture.disabled = isStaticPagesMode;
+  elements.loadCapture.disabled = !hasServerApi;
   elements.upgradeQuality.disabled = currentItems.length === 0;
   elements.downloadLarge.disabled = zipCount === 0;
   elements.downloadLarge.textContent = selected.length > 0
@@ -2500,11 +2727,30 @@ function createMediaCard(item, index) {
   const retry = document.createElement("button");
   const filename = filenameFor(item, index);
   const key = itemKey(item);
+  const carouselKey = carouselGroupKey(item);
 
   preview.classList.add("m-clickable");
   node.dataset.itemKey = key;
   node.classList.toggle("is-selected", selectedItemKeys.has(key));
   node.classList.toggle("is-error", Boolean(item.loadError));
+  if (carouselKey) {
+    const previousKey = carouselGroupKey(galleryViewItems[index - 1]);
+    const nextKey = carouselGroupKey(galleryViewItems[index + 1]);
+    const carouselPosition = carouselPositionLabel(item, galleryViewItems);
+    const thread = document.createElement("span");
+    thread.className = "media-thread";
+    thread.textContent = carouselPosition;
+    thread.setAttribute("aria-label", `Carrusel ${carouselPosition}`);
+
+    node.classList.add("is-carousel-item");
+    node.classList.toggle("is-carousel-start", previousKey !== carouselKey);
+    node.classList.toggle("is-carousel-end", nextKey !== carouselKey);
+    node.classList.toggle("is-carousel-single", previousKey !== carouselKey && nextKey !== carouselKey);
+    node.dataset.carouselKey = carouselKey;
+    node.dataset.carouselIndex = String(carouselIndexForItem(item));
+    node.dataset.carouselTotal = String(carouselTotalForItem(item, galleryViewItems));
+    preview.append(thread);
+  }
   node.setAttribute("aria-label", viewerCaptionFor(item, index, galleryViewItems.length));
   node.title = [
     viewerCaptionFor(item, index, galleryViewItems.length),
@@ -2812,37 +3058,37 @@ elements.parseSource.addEventListener("click", async () => {
 });
 
 elements.loadCapture.addEventListener("click", async () => {
-  if (needsLocalServer("Usar captura local")) return;
+  if (needsLocalServer("Usar captura")) return;
 
   let capture;
   try {
     capture = await fetch("/api/capture", { cache: "no-store" }).then((response) => response.json());
   } catch (error) {
-    setMessage(`No pude leer la captura local: ${error.message}`, true);
+    setMessage(`No pude leer la captura: ${error.message}`, true);
     return;
   }
 
   if (!capture.ok || !capture.body) {
-    setMessage("Todavia no hay captura local. Abre la publicacion y pulsa Capturar pestana actual en la extension.", true);
+    setMessage("Todavia no hay captura. Abre la publicacion y pulsa Capturar pestana actual en la extension.", true);
     return;
   }
 
   logCaptureDebug("captura recibida", { summary: captureSummaryForDebug(capture) });
 
-  setMessage("Leyendo captura local y resolviendo enlaces X si aparecen...");
+  setMessage("Leyendo captura y resolviendo enlaces X si aparecen...");
   activeAuditId += 1;
   activeResolveId += 1;
   await yieldToBrowser();
-  let items = parseMediaDetailed(capture.body).items;
+  const items = parseMediaDetailed(capture.body).items;
   logCaptureDebug("despues de parse", { items, reportRows: lastGalleryReport });
   selectedItemKeys.clear();
   currentItems = items;
   renderGallery(items);
   if (items.length === 0) {
-    setMessage("La captura local no trajo media util.", true);
+    setMessage("La captura no trajo media util.", true);
     return;
   }
-  setMessage(`Captura local usable: ${items.length} elemento(s). Refinando dimensiones en segundo plano...`);
+  setMessage(`Captura usable: ${items.length} elemento(s). Refinando dimensiones en segundo plano...`);
   void resolveAndMergePageMedia(capture.body, "capture");
   void runGalleryAudit(items, "capture").then(() => {
     logCaptureDebug("despues de audit", { items: currentItems, reportRows: lastGalleryReport });
@@ -3084,5 +3330,10 @@ if (isStaticPagesMode) {
   if (privacyStatus) privacyStatus.textContent = "Demo GitHub Pages";
   elements.downloadLarge.textContent = "Descargar directas >500";
   elements.loadCapture.disabled = true;
-  setMessage("Modo Pages: puedes pegar HTML/JSON/URLs, auditar dimensiones, mejorar calidad en navegador y descargar enlaces directos. Captura local y ZIP con proxy requieren npm start.", true);
+  setMessage("Modo Pages: puedes pegar HTML/JSON/URLs, auditar dimensiones, mejorar calidad en navegador y descargar enlaces directos. Captura y ZIP con proxy requieren npm start o Netlify.", true);
+} else if (!isLocalServerMode) {
+  const privacyStatus = document.querySelector("#privacy-status");
+  if (privacyStatus) privacyStatus.textContent = "Netlify Cloud";
+  elements.loadCapture.textContent = "Usar captura cloud";
+  setMessage("Modo Netlify: captura desde la extension, proxy y ZIP usan Functions/Blobs. Evita subir contenido sensible si no quieres que pase por Netlify.");
 }

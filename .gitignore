@@ -15,3 +15,9 @@ npm-debug.log*
 Thumbs.db
 
 *_snapshot.md
+
+# Local Netlify folder
+.netlify
+
+# Codex local QA artifacts
+.codex-artifacts/
